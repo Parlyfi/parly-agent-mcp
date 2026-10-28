@@ -5,7 +5,7 @@ and V7 cross-chain payouts. Supported Tempo assets are USDC.e, USDT0 and
 OpenUSD (OUSD); destination assets depend on the active route.
 
 Agent Selfhost MCP runs with your configured agent wallet. For wallet-connected
-account tools, choose Parly Hosted MCP at `https://mcp.parly.fi/mcp`, or run
+account tools, choose Parly Hosted MCP at `https://mcp.parly.fi/`, or run
 Parly Selfhost MCP on infrastructure you control.
 
 ## What this project is
