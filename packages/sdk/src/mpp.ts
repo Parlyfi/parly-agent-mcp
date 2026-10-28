@@ -3,6 +3,7 @@ import {
   ParlySDK,
   type ExecutePaymentOutcome
 } from "./core.js"
+import type { PoolV3PublicSpendPlan } from "./coin-selection.js"
 
 export type MppSessionSpec = {
   sessionId: string
@@ -46,6 +47,22 @@ export type MppPaymentPreflight =
       destinationEid: number
       poolAddress: `0x${string}`
       settlementMode: "parly-private-immediate"
+      poolVersion: 2
+      historyCompatibility: "historical_v2"
+    }
+  | {
+      ok: true
+      sessionId: string
+      assetId: 1 | 2
+      amount: string
+      spendLimit: string
+      destination: `0x${string}`
+      destinationEid: number
+      poolAddress: `0x${string}`
+      settlementMode: "parly-private-immediate"
+      poolVersion: 3
+      historyCompatibility: "pool_v2_read_only"
+      privateBalancePlan: PoolV3PublicSpendPlan
     }
   | {
       ok: false
@@ -148,7 +165,51 @@ export class ParlyMppAdapter {
       destination: request.destination,
       destinationEid: session.destinationEid,
       poolAddress: session.poolAddress,
-      settlementMode: session.settlementMode
+      settlementMode: session.settlementMode,
+      poolVersion: 2,
+      historyCompatibility: "historical_v2"
+    }
+  }
+
+  async preflightPoolV3SessionPayment(
+    request: MppSettlementRequest,
+    session: MppSessionRecord,
+    options: {
+      finalFees?: string
+      consolidationFee?: string
+    } = {}
+  ): Promise<MppPaymentPreflight> {
+    try {
+      assertSessionPayment(request, session)
+    } catch (error) {
+      return {
+        ok: false,
+        sessionId: session.sessionId,
+        reason: error instanceof Error ? error.message : String(error)
+      }
+    }
+
+    const privateBalancePlan = await this.sdk.preparePrivateSend({
+      assetId: session.assetId,
+      poolAddress: session.poolAddress,
+      amount: request.amount,
+      finalFees: options.finalFees,
+      consolidationFee: options.consolidationFee
+    })
+
+    return {
+      ok: true,
+      sessionId: session.sessionId,
+      assetId: session.assetId,
+      amount: request.amount,
+      spendLimit: session.spendLimit,
+      destination: request.destination,
+      destinationEid: session.destinationEid,
+      poolAddress: session.poolAddress,
+      settlementMode: session.settlementMode,
+      poolVersion: 3,
+      historyCompatibility: "pool_v2_read_only",
+      privateBalancePlan
     }
   }
 }

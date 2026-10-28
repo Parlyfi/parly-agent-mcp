@@ -1,22 +1,31 @@
 import fs from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { requireEnv, requirePositiveChainIdValue } from "@parly/env-utils"
-import { POOL_ABI } from "@parly/protocol-abis"
-import type { PublicSurfaceRecord } from "@parly/shared-types"
+import { buildIndexedMerklePath } from "@parly/crypto-utils"
+import { tempoShieldedPoolV2Abi } from "@parly/protocol-abis"
+import type { CanonicalRelayExecutionPayload, PublicSurfaceRecord } from "@parly/shared-types"
 import {
   createPublicClient,
   createWalletClient,
   defineChain,
+  getAddress,
   http,
   isAddress,
   parseUnits
 } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
-import { MerkleTree } from "fixed-merkle-tree"
 
 import { safeApproveExactSdk } from "./erc20.js"
+import {
+  preparePoolV3PrivateSend,
+  summarizePoolV3PrivateBalance,
+  type PoolV3CoinSelectionNote,
+  type PoolV3PrivateBalanceSummary,
+  type PoolV3PublicSpendPlan
+} from "./coin-selection.js"
 import {
   type EnvelopeRow,
   fetchEnvelopes,
@@ -30,10 +39,17 @@ import {
 import { resolveTempoSettlementEid } from "./lz-options.js"
 import {
   createFreshNote,
+  createSealedRecoveryEnvelope,
   openSealedNoteEnvelope,
   reconstructEnvelopeNote,
   type NoteEnvelopePayload
 } from "./note-crypto.js"
+import {
+  buildPayoutV5AuthorizationMessage,
+  derivePayoutV5RefundCommitment,
+  derivePayoutV5RefundSalt
+} from "./payout-v5.js"
+import { ParlyPublicApiClient, type PayoutV5Acceptance, type PayoutV5Quote } from "./public-api.js"
 import { buildSdkRecoveryAuthMessage, deriveRecoveryKeypair } from "./recovery-keys.js"
 
 const require = createRequire(import.meta.url)
@@ -64,7 +80,37 @@ export type ParlySDKConfig = {
   tempoLzEid: number
   ponderGraphqlUrl?: string
   proofAssetsBasePath?: string
+  webApiBaseUrl?: string
 }
+
+export type ExecuteCrossChainPayoutParams = {
+  destinationChainId: number
+  destinationToken: `0x${string}`
+  destinationRecipient: `0x${string}`
+  amount: string
+  assetId: 1 | 2
+  poolAddress: `0x${string}`
+  proofAssetsBasePath?: string
+}
+
+export type CrossChainPayoutRecovery = {
+  adapter: `0x${string}`
+  intentHash: `0x${string}`
+  escrowSalt: `0x${string}`
+  refundSalt: `0x${string}`
+  statusAccessToken: string
+  sourceNoteNullifierHash: `0x${string}`
+}
+
+export type ExecuteCrossChainPayoutOutcome =
+  | {
+      kind: "relayer_submitted"
+      payoutId: string
+      supportReference: string
+      statusAccessToken: string
+      recovery: CrossChainPayoutRecovery
+    }
+  | { kind: "terminal_failure"; message: string }
 
 export type ExecutePaymentParams = {
   destination: `0x${string}`
@@ -88,7 +134,7 @@ export type ExecuteBatchPaymentParams = {
   proofAssetsBasePath?: string
 }
 
-export type ParlyLaunchContext = ParlySDKConfig & {
+export type ParlyLaunchContext = Pick<ParlySDKConfig, "tempoChainId" | "tempoLzEid"> & {
   publicSurfaces: PublicSurfaceRecord[]
 }
 
@@ -101,6 +147,18 @@ export type ExecutePaymentOutcome =
       persistedTo: string | null
     }
   | { kind: "terminal_failure"; hash?: `0x${string}`; message: string }
+
+export type GetPrivateBalanceParams = {
+  assetId: 1 | 2
+  poolAddress: `0x${string}`
+}
+
+export type PreparePrivateSendParams = GetPrivateBalanceParams & {
+  amount: string
+  finalFees?: string
+  consolidationFee?: string
+  approvedCommitments?: readonly `0x${string}`[]
+}
 
 type PendingSdkExecutionRecord = {
   version: 1
@@ -124,8 +182,11 @@ type CachedSdkBestNote = {
 }
 
 type SdkRecoveryCacheEntry = {
-  version: 2
+  version: 4
   assetId: 1 | 2
+  poolAddress: `0x${string}`
+  chainId: number
+  recoveryPublicKeyB64: string
   heads: RecoveryHeads
   leaves: Array<{
     commitment: string
@@ -138,7 +199,7 @@ type SdkRecoveryCacheEntry = {
 }
 
 type SdkRecoveryCacheFile = {
-  version: 2
+  version: 4
   assets: Record<string, SdkRecoveryCacheEntry>
 }
 
@@ -155,7 +216,7 @@ const PUBLIC_SURFACES: PublicSurfaceRecord[] = [
   },
   {
     name: "mcp",
-    description: "Agent-facing public MCP distribution.",
+    description: "Parly Unhosted MCP: developer-operated agent tools, separate from Hosted MCP.",
     audience: "agent-integrators"
   }
 ]
@@ -194,7 +255,21 @@ function recoveryHeadsEqual(a: RecoveryHeads | null, b: RecoveryHeads | null) {
   )
 }
 
-function loadSdkRecoveryCache(assetId: 1 | 2): SdkRecoveryCacheEntry | null {
+function sdkRecoveryCacheKey(
+  assetId: 1 | 2,
+  poolAddress: `0x${string}`,
+  chainId: number,
+  recoveryPublicKeyB64: string
+) {
+  return `${chainId}:${assetId}:${poolAddress.toLowerCase()}:${recoveryPublicKeyB64}`
+}
+
+function loadSdkRecoveryCache(
+  assetId: 1 | 2,
+  poolAddress: `0x${string}`,
+  chainId: number,
+  recoveryPublicKeyB64: string
+): SdkRecoveryCacheEntry | null {
   const raw = process.env.SDK_RECOVERY_CACHE_FILE
   if (!raw) {
     return null
@@ -207,8 +282,14 @@ function loadSdkRecoveryCache(assetId: 1 | 2): SdkRecoveryCacheEntry | null {
 
   try {
     const parsed = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as SdkRecoveryCacheFile
-    const entry = parsed?.assets?.[String(assetId)]
-    return entry && parsed?.version === 2 && entry.version === 2 && entry.assetId === assetId
+    const entry = parsed?.assets?.[sdkRecoveryCacheKey(assetId, poolAddress, chainId, recoveryPublicKeyB64)]
+    return entry &&
+      parsed?.version === 4 &&
+      entry.version === 4 &&
+      entry.assetId === assetId &&
+      entry.chainId === chainId &&
+      entry.recoveryPublicKeyB64 === recoveryPublicKeyB64 &&
+      entry.poolAddress.toLowerCase() === poolAddress.toLowerCase()
       ? entry
       : null
   } catch {
@@ -226,27 +307,35 @@ function saveSdkRecoveryCache(entry: SdkRecoveryCacheEntry) {
   fs.mkdirSync(path.dirname(cacheFile), { recursive: true })
 
   let file: SdkRecoveryCacheFile = {
-    version: 2,
+    version: 4,
     assets: {}
   }
 
   try {
     if (fs.existsSync(cacheFile)) {
-      file = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as SdkRecoveryCacheFile
+      const parsed = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as SdkRecoveryCacheFile | null
+      if (parsed && parsed.assets && typeof parsed.assets === "object" && !Array.isArray(parsed.assets)) {
+        file = parsed
+      }
     }
   } catch {
       file = {
-      version: 2,
-      assets: {}
-    }
+        version: 4,
+        assets: {}
+      }
   }
 
-  file.version = 2
-  file.assets[String(entry.assetId)] = entry
+  file.version = 4
+  file.assets[sdkRecoveryCacheKey(entry.assetId, entry.poolAddress, entry.chainId, entry.recoveryPublicKeyB64)] = entry
   fs.writeFileSync(cacheFile, JSON.stringify(file, null, 2) + "\n", "utf8")
 }
 
-function clearSdkRecoveryCache(assetId: 1 | 2) {
+function clearSdkRecoveryCache(
+  assetId: 1 | 2,
+  poolAddress: `0x${string}`,
+  chainId: number,
+  recoveryPublicKeyB64: string
+) {
   const raw = process.env.SDK_RECOVERY_CACHE_FILE
   if (!raw) {
     return
@@ -259,11 +348,11 @@ function clearSdkRecoveryCache(assetId: 1 | 2) {
 
   try {
     const parsed = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as SdkRecoveryCacheFile
-    delete parsed.assets[String(assetId)]
+    delete parsed.assets[sdkRecoveryCacheKey(assetId, poolAddress, chainId, recoveryPublicKeyB64)]
     fs.writeFileSync(
       cacheFile,
       JSON.stringify({
-        version: 2,
+        version: 4,
         assets: parsed.assets || {}
       }, null, 2) + "\n",
       "utf8"
@@ -346,19 +435,21 @@ export class ParlySDK {
           env.NEXT_PUBLIC_SETTLEMENT_DOMAIN_ID
       ),
       ponderGraphqlUrl: env.PONDER_GRAPHQL_URL ?? env.NEXT_PUBLIC_PONDER_GRAPHQL_URL,
-      proofAssetsBasePath: env.PARLY_SDK_ASSETS_PATH
+      proofAssetsBasePath: env.PARLY_SDK_ASSETS_PATH,
+      webApiBaseUrl: env.PARLY_WEB_API_BASE_URL
     })
   }
 
   getLaunchContext(): ParlyLaunchContext {
     return {
-      ...this.config,
+      tempoChainId: this.config.tempoChainId,
+      tempoLzEid: this.config.tempoLzEid,
       publicSurfaces: PUBLIC_SURFACES
     }
   }
 
   describe(): string {
-    return `ParlySDK V16.9.9 ready for Tempo chain ${this.config.tempoChainId} and settlement domain ${this.config.tempoLzEid}.`
+    return `ParlySDK V16.9.10 ready for Tempo chain ${this.config.tempoChainId} and settlement domain ${this.config.tempoLzEid}.`
   }
 
   async authenticate(recoveryMessage: string) {
@@ -394,11 +485,13 @@ export class ParlySDK {
       throw new Error("poolAddress is required for v2 SDK recovery.")
     }
 
+    const chainId = this.config.tempoChainId
     const keypair = await this.getRecoveryKeypair({ assetId, poolAddress: resolvedPoolAddress })
     const latestHeads = await fetchRecoveryHeads(assetId, {
-      ponderUrl: this.config.ponderGraphqlUrl
+      ponderUrl: this.config.ponderGraphqlUrl,
+      poolAddress: resolvedPoolAddress
     })
-    const cached = loadSdkRecoveryCache(assetId)
+    const cached = loadSdkRecoveryCache(assetId, resolvedPoolAddress, chainId, keypair.publicKeyB64)
 
     if (cached && recoveryHeadsEqual(cached.heads, latestHeads)) {
       try {
@@ -419,14 +512,23 @@ export class ParlySDK {
           kp: keypair
         }
       } catch {
-        clearSdkRecoveryCache(assetId)
+        clearSdkRecoveryCache(assetId, resolvedPoolAddress, chainId, keypair.publicKeyB64)
       }
     }
 
     const [envelopes, leaves, nullifiers] = (await Promise.all([
-      fetchEnvelopes(assetId, { ponderUrl: this.config.ponderGraphqlUrl }),
-      fetchLeaves(assetId, { ponderUrl: this.config.ponderGraphqlUrl }),
-      fetchNullifiers(assetId, { ponderUrl: this.config.ponderGraphqlUrl })
+      fetchEnvelopes(assetId, {
+        ponderUrl: this.config.ponderGraphqlUrl,
+        poolAddress: resolvedPoolAddress
+      }),
+      fetchLeaves(assetId, {
+        ponderUrl: this.config.ponderGraphqlUrl,
+        poolAddress: resolvedPoolAddress
+      }),
+      fetchNullifiers(assetId, {
+        ponderUrl: this.config.ponderGraphqlUrl,
+        poolAddress: resolvedPoolAddress
+      })
     ])) as [EnvelopeRow[], LeafRow[], NullifierRow[]]
 
     const leafSet = new Set(leaves.map((leaf: any) => String(leaf.commitment).toLowerCase()))
@@ -483,8 +585,11 @@ export class ParlySDK {
     }
 
     saveSdkRecoveryCache({
-      version: 2,
+      version: 4,
       assetId,
+      poolAddress: resolvedPoolAddress,
+      chainId,
+      recoveryPublicKeyB64: keypair.publicKeyB64,
       heads: latestHeads,
       leaves,
       best: best
@@ -498,6 +603,345 @@ export class ParlySDK {
     })
 
     return { best, leaves, kp: keypair }
+  }
+
+  private async recoverPoolV3SelectionNotes(
+    assetId: 1 | 2,
+    poolAddress: `0x${string}`
+  ): Promise<PoolV3CoinSelectionNote[]> {
+    if (!isAddress(poolAddress) || poolAddress.toLowerCase() === ZERO_ADDRESS) {
+      throw new Error("PoolV3 address must be a non-zero address.")
+    }
+
+    const keypair = await this.getRecoveryKeypair({ assetId, poolAddress })
+    const [envelopes, leaves, nullifiers] = (await Promise.all([
+      fetchEnvelopes(assetId, {
+        ponderUrl: this.config.ponderGraphqlUrl,
+        poolAddress
+      }),
+      fetchLeaves(assetId, {
+        ponderUrl: this.config.ponderGraphqlUrl,
+        poolAddress
+      }),
+      fetchNullifiers(assetId, {
+        ponderUrl: this.config.ponderGraphqlUrl,
+        poolAddress
+      })
+    ])) as [EnvelopeRow[], LeafRow[], NullifierRow[]]
+
+    const leavesByCommitment = new Map(
+      leaves.map((leaf) => [String(leaf.commitment).toLowerCase(), leaf] as const)
+    )
+    const spent = new Set(
+      nullifiers.map((row) => String(row.nullifierHash).toLowerCase())
+    )
+    const recovered = new Map<string, PoolV3CoinSelectionNote>()
+
+    for (const envelope of envelopes) {
+      try {
+        const payload = await openSealedNoteEnvelope(
+          keypair.publicKeyB64,
+          keypair.privateKeyB64,
+          envelope.envelope
+        )
+        if (
+          payload.version !== 2 ||
+          payload.poolVersion !== 3 ||
+          payload.chainId !== this.config.tempoChainId ||
+          Number(payload.assetId) !== assetId ||
+          payload.poolAddress.toLowerCase() !== poolAddress.toLowerCase()
+        ) {
+          continue
+        }
+
+        const note = await reconstructEnvelopeNote(payload)
+        const commitment = note.commitment.toLowerCase()
+        const leaf = leavesByCommitment.get(commitment)
+        if (!leaf || spent.has(note.nullifierHash.toLowerCase())) continue
+
+        recovered.set(commitment, {
+          commitment: note.commitment,
+          amount: BigInt(payload.amount),
+          confirmedLeafIndex: Number(leaf.leafIndex),
+          chainId: this.config.tempoChainId,
+          poolAddress,
+          assetId: String(assetId),
+          state: "unspent"
+        })
+      } catch {
+        continue
+      }
+    }
+
+    return [...recovered.values()]
+  }
+
+  async getPrivateBalance(
+    params: GetPrivateBalanceParams
+  ): Promise<PoolV3PrivateBalanceSummary> {
+    const notes = await this.recoverPoolV3SelectionNotes(params.assetId, params.poolAddress)
+    return summarizePoolV3PrivateBalance({
+      notes,
+      chainId: this.config.tempoChainId,
+      poolAddress: params.poolAddress,
+      assetId: String(params.assetId)
+    })
+  }
+
+  async preparePrivateSend(
+    params: PreparePrivateSendParams
+  ): Promise<PoolV3PublicSpendPlan> {
+    const notes = await this.recoverPoolV3SelectionNotes(params.assetId, params.poolAddress)
+    const consolidationFee = parseUnits(params.consolidationFee ?? "0", 6)
+
+    return preparePoolV3PrivateSend({
+      notes,
+      chainId: this.config.tempoChainId,
+      poolAddress: params.poolAddress,
+      assetId: String(params.assetId),
+      requestedAmount: parseUnits(params.amount, 6),
+      finalFees: parseUnits(params.finalFees ?? "0", 6),
+      approvedCommitments: params.approvedCommitments,
+      consolidationFee: () => consolidationFee
+    })
+  }
+
+  private async buildPayoutV5PoolPayload(args: {
+    quote: PayoutV5Quote
+    sourceNote: {
+      payload: NoteEnvelopePayload
+      commitment: `0x${string}`
+      nullifierHash: `0x${string}`
+      amount: bigint
+    }
+    recoveryPublicKeyB64: string
+    assetId: 1 | 2
+    poolAddress: `0x${string}`
+    proofAssetsBasePath?: string
+  }): Promise<CanonicalRelayExecutionPayload> {
+    const amountIn = BigInt(args.quote.escrowAmountBaseUnits)
+    const protocolFee = BigInt(args.quote.protocolFeeBaseUnits)
+    const executorFee = BigInt(args.quote.executorFeeBaseUnits)
+    const expectedTotal = amountIn + protocolFee + executorFee
+    if (BigInt(args.quote.totalNeededFromNoteBaseUnits) !== expectedTotal) {
+      throw new Error("The V5 quote total does not match its signed fee components.")
+    }
+    if (args.sourceNote.amount < expectedTotal) throw new Error("Insufficient private balance for payout and source fees.")
+
+    const [poseidon, leaves, zeros] = await Promise.all([
+      buildPoseidon(),
+      fetchLeaves(args.assetId, { ponderUrl: this.config.ponderGraphqlUrl, poolAddress: args.poolAddress }),
+      Promise.all(Array.from({ length: 32 }, (_, level) => this.publicClient.readContract({
+        address: args.poolAddress,
+        abi: tempoShieldedPoolV2Abi,
+        functionName: "zeros",
+        args: [BigInt(level)]
+      })))
+    ])
+    const note = leaves.find((leaf) =>
+      String(leaf.commitment).toLowerCase() === args.sourceNote.commitment.toLowerCase()
+    )
+    if (!note) throw new Error("Private balance note is missing from the current Merkle tree.")
+    const treePath = buildIndexedMerklePath({
+      levels: 32,
+      leaves: leaves.map((leaf) => ({ index: Number(leaf.leafIndex), value: BigInt(leaf.commitment) })),
+      leafIndex: Number(note.leafIndex),
+      zeros: zeros.map((zero) => BigInt(zero)),
+      hash: (left, right) => BigInt(poseidon.F.toString(poseidon([left, right])))
+    })
+    const proofRoot = `0x${treePath.root.toString(16).padStart(64, "0")}` as `0x${string}`
+    const rootIsKnown = await this.publicClient.readContract({
+      address: args.poolAddress,
+      abi: tempoShieldedPoolV2Abi,
+      functionName: "knownRoots",
+      args: [proofRoot]
+    })
+    if (!rootIsKnown) throw new Error("Private balance proof is still syncing.")
+
+    const changeAmount = args.sourceNote.amount - expectedTotal
+    let newChangeCommitment = `0x${"0".repeat(64)}` as `0x${string}`
+    let newChangeEnvelope = "0x" as `0x${string}`
+    let newChangeSecret = "0"
+    let newChangeNullifier = "0"
+    if (changeAmount > 0n) {
+      const change = await createFreshNote(
+        args.recoveryPublicKeyB64,
+        args.sourceNote.payload.depositor,
+        args.assetId,
+        changeAmount.toString(),
+        "change"
+      )
+      newChangeCommitment = change.commitment
+      newChangeEnvelope = change.envelope
+      newChangeSecret = change.secret
+      newChangeNullifier = change.nullifier
+    }
+
+    const recipients = [getAddress(args.quote.escrow), ...Array(9).fill(ZERO_ADDRESS)] as `0x${string}`[]
+    const amounts = [amountIn, ...Array(9).fill(0n)]
+    const destinationEids = Array(10).fill(this.config.tempoLzEid) as number[]
+    const circuitInputs = {
+      root: treePath.root.toString(),
+      nullifierHash: BigInt(args.sourceNote.nullifierHash).toString(),
+      protocol_fee: protocolFee.toString(),
+      executor_fee: executorFee.toString(),
+      total_input_amount: args.sourceNote.payload.amount,
+      asset_id: String(args.assetId),
+      local_eid: String(this.config.tempoLzEid),
+      recipients: recipients.map((recipient) => BigInt(recipient).toString()),
+      amounts: amounts.map(String),
+      dest_eids: destinationEids.map(String),
+      new_change_commitment: BigInt(newChangeCommitment).toString(),
+      relayer: BigInt(getAddress(args.quote.withdrawalExecutor)).toString(),
+      secret: args.sourceNote.payload.secret,
+      nullifier: args.sourceNote.payload.nullifier,
+      depositor: BigInt(args.sourceNote.payload.depositor).toString(),
+      pathElements: treePath.pathElements.map(String),
+      pathIndices: treePath.pathIndices,
+      new_change_secret: newChangeSecret,
+      new_change_nullifier: newChangeNullifier
+    }
+    const assetsBasePath = resolveProofAssetsBasePath(args.proofAssetsBasePath || this.config.proofAssetsBasePath)
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(
+      circuitInputs,
+      `${assetsBasePath}/joinsplit.wasm`,
+      `${assetsBasePath}/joinsplit_final.zkey`
+    )
+    const mappedSignals = publicSignals.map((signal) => BigInt(signal))
+    if (mappedSignals[11] !== treePath.root) throw new Error("Generated proof root does not match the selected private balance.")
+    const hex = (value: string) => `0x${BigInt(value).toString(16).padStart(64, "0")}` as `0x${string}`
+    return {
+      pool: args.poolAddress,
+      pA: [hex(proof.pi_a[0]), hex(proof.pi_a[1])],
+      pB: [[hex(proof.pi_b[0][1]), hex(proof.pi_b[0][0])], [hex(proof.pi_b[1][1]), hex(proof.pi_b[1][0])]],
+      pC: [hex(proof.pi_c[0]), hex(proof.pi_c[1])],
+      pubSignals: publicSignals,
+      recipients,
+      amounts: amounts.map(String),
+      destEids: destinationEids,
+      newChangeCommitment,
+      newChangeEnvelope,
+      lzOptions: Array(10).fill("0x") as `0x${string}`[],
+      payoutV5: {
+        intentHash: args.quote.quoteHash,
+        adapter: getAddress(args.quote.adapter),
+        withdrawalExecutor: getAddress(args.quote.withdrawalExecutor),
+        escrow: getAddress(args.quote.escrow),
+        amountIn: amountIn.toString(),
+        executorFee: executorFee.toString()
+      }
+    }
+  }
+
+  async sendCrossChainShieldedPayment(
+    params: ExecuteCrossChainPayoutParams
+  ): Promise<ExecuteCrossChainPayoutOutcome> {
+    try {
+      const baseUrl = this.config.webApiBaseUrl?.trim()
+      if (!baseUrl) throw new Error("webApiBaseUrl is required for cross-chain payouts.")
+      if (!isAddress(params.poolAddress) || !isAddress(params.destinationToken) || !isAddress(params.destinationRecipient)) {
+        throw new Error("Cross-chain payout addresses are invalid.")
+      }
+      if (!Number.isSafeInteger(params.destinationChainId) || params.destinationChainId <= 0 ||
+          params.destinationChainId === this.config.tempoChainId) {
+        throw new Error("Cross-chain destination is invalid.")
+      }
+      const amountOut = parseUnits(params.amount, 6)
+      if (amountOut <= 0n) throw new Error("Payout amount must be positive.")
+      const { best, kp } = await this.recoverLargestNote(params.assetId, params.poolAddress)
+      if (!best) throw new Error("No live note found.")
+
+      const escrowSalt = `0x${randomBytes(32).toString("hex")}` as `0x${string}`
+      const refundSalt = derivePayoutV5RefundSalt({
+        sourceNoteSecret: best.payload.secret,
+        sourceNoteNullifier: best.payload.nullifier,
+        refundWallet: this.account.address,
+        escrowSalt
+      })
+      const refundRecipientCommitment = derivePayoutV5RefundCommitment({
+        chainId: this.config.tempoChainId,
+        refundWallet: this.account.address,
+        escrowSalt,
+        refundSalt
+      })
+      const api = new ParlyPublicApiClient(baseUrl)
+      const quoted = await api.quoteCrossChainPayout({
+        assetId: params.assetId,
+        sourcePool: getAddress(params.poolAddress),
+        destinationChainId: params.destinationChainId,
+        destinationToken: getAddress(params.destinationToken),
+        destinationRecipient: getAddress(params.destinationRecipient),
+        amountOutBaseUnits: amountOut.toString(),
+        refundWallet: this.account.address,
+        refundRecipientCommitment,
+        escrowSalt
+      })
+      if (!quoted.ok || !quoted.quote) throw new Error(quoted.error || "Cross-chain payout quote is unavailable.")
+      const quote = quoted.quote
+      const poolPayload = await this.buildPayoutV5PoolPayload({
+        quote,
+        sourceNote: best,
+        recoveryPublicKeyB64: kp.publicKeyB64,
+        assetId: params.assetId,
+        poolAddress: getAddress(params.poolAddress),
+        proofAssetsBasePath: params.proofAssetsBasePath
+      })
+      const issuedAt = Math.floor(Date.now() / 1000)
+      if (quote.quoteExpiresAt < issuedAt + 300) throw new Error("The payout quote expired while its private proof was prepared.")
+      const authorizationBase = {
+        wallet: this.account.address,
+        issuedAt,
+        nonce: randomBytes(24).toString("base64url")
+      }
+      const authorizationMessage = buildPayoutV5AuthorizationMessage({ quote, authorization: authorizationBase })
+      const authorization = {
+        ...authorizationBase,
+        signature: await this.walletClient.signMessage({ account: this.account, message: authorizationMessage })
+      }
+      const accepted = await api.authorizeCrossChainPayout({ quoteHash: quote.quoteHash, authorization })
+      if (!accepted.ok || !accepted.payout) throw new Error(accepted.error || "Cross-chain payout authorization was rejected.")
+      const payout: PayoutV5Acceptance = accepted.payout
+      const capsule = {
+        version: 2,
+        adapterVersion: "v5",
+        chainId: this.config.tempoChainId,
+        statusAccessToken: payout.statusAccessToken,
+        adapter: payout.adapter,
+        intentHash: payout.intentHash,
+        escrowSalt,
+        sourceNoteNullifierHash: best.nullifierHash,
+        assetId: params.assetId,
+        amountLabel: params.amount,
+        destinationLabel: String(params.destinationChainId),
+        createdAt: issuedAt
+      } as const
+      await api.storePayoutRecoveryCapsule({
+        statusAccessToken: payout.statusAccessToken,
+        adapterVersion: "v5",
+        recoveryKeyHash: createHash("sha256").update(kp.publicKeyB64).digest("hex"),
+        sealedPayload: await createSealedRecoveryEnvelope(kp.publicKeyB64, capsule)
+      })
+      await api.attachCrossChainPayoutProof({
+        statusAccessToken: payout.statusAccessToken,
+        payload: poolPayload as unknown as Record<string, unknown>
+      })
+      return {
+        kind: "relayer_submitted",
+        payoutId: payout.payoutId,
+        supportReference: payout.supportReference,
+        statusAccessToken: payout.statusAccessToken,
+        recovery: {
+          adapter: payout.adapter,
+          intentHash: payout.intentHash,
+          escrowSalt,
+          refundSalt,
+          statusAccessToken: payout.statusAccessToken,
+          sourceNoteNullifierHash: best.nullifierHash
+        }
+      }
+    } catch (error) {
+      return { kind: "terminal_failure", message: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   async executeAgenticPayment(params: ExecutePaymentParams | ExecuteBatchPaymentParams): Promise<ExecutePaymentOutcome> {
@@ -530,36 +974,57 @@ export class ParlySDK {
       }
       pendingRecordOutput = outputs[0] ?? null
 
-      const { best, leaves, kp } = await this.recoverLargestNote(params.assetId, params.poolAddress)
+      const { best, kp } = await this.recoverLargestNote(params.assetId, params.poolAddress)
       if (!best) {
         throw new Error("No live note found.")
       }
       activeNullifierHash = best.nullifierHash as `0x${string}`
 
-      const poseidon = await buildPoseidon()
-      const zeroElement = BigInt(poseidon.F.toString(poseidon([0n, 0n]))).toString()
+      const [poseidon, leaves, zeros] = await Promise.all([
+        buildPoseidon(),
+        fetchLeaves(params.assetId, {
+          ponderUrl: this.config.ponderGraphqlUrl,
+          poolAddress: params.poolAddress
+        }),
+        Promise.all(
+          Array.from({ length: 32 }, (_, level) =>
+            this.publicClient.readContract({
+              address: params.poolAddress,
+              abi: tempoShieldedPoolV2Abi,
+              functionName: "zeros",
+              args: [BigInt(level)]
+            })
+          )
+        )
+      ])
 
-      const tree = new (MerkleTree as any)(
-        32,
-        leaves.map((leaf) => String(leaf.commitment)),
-        {
-          hashFunction: (left: any, right: any) =>
-            poseidon.F.toString(poseidon([BigInt(left), BigInt(right)])),
-          zeroElement
-        }
-      )
-
-      const noteIndex = leaves.findIndex(
+      const note = leaves.find(
         (leaf) =>
           String(leaf.commitment).toLowerCase() === String(best.commitment).toLowerCase()
       )
-      if (noteIndex === -1) {
+      if (!note) {
         throw new Error("Note not found in Merkle tree.")
       }
 
-      const { pathElements, pathIndices } = tree.path(noteIndex) as {
-        pathElements: Array<string | bigint | number>
-        pathIndices: number[]
+      const treePath = buildIndexedMerklePath({
+        levels: 32,
+        leaves: leaves.map((leaf) => ({
+          index: Number(leaf.leafIndex),
+          value: BigInt(leaf.commitment)
+        })),
+        leafIndex: Number(note.leafIndex),
+        zeros: zeros.map((zero) => BigInt(zero)),
+        hash: (left, right) => BigInt(poseidon.F.toString(poseidon([left, right])))
+      })
+      const proofRoot = `0x${treePath.root.toString(16).padStart(64, "0")}` as `0x${string}`
+      const rootIsKnown = await this.publicClient.readContract({
+        address: params.poolAddress,
+        abi: tempoShieldedPoolV2Abi,
+        functionName: "knownRoots",
+        args: [proofRoot]
+      })
+      if (!rootIsKnown) {
+        throw new Error("Private balance proof is still syncing. Refresh recovery and try again.")
       }
 
       const localEid = this.config.tempoLzEid
@@ -578,7 +1043,7 @@ export class ParlySDK {
 
       const feeBps = (await this.publicClient.readContract({
         address: params.poolAddress,
-        abi: POOL_ABI,
+        abi: tempoShieldedPoolV2Abi,
         functionName: "globalFeeBps"
       })) as bigint
 
@@ -588,9 +1053,6 @@ export class ParlySDK {
       if (changeAmount < 0n) {
         throw new Error("Insufficient balance.")
       }
-
-      let option = "0x" as `0x${string}`
-      let quotedCrossChainFee = 0n
 
       let newChangeCommitment =
         "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`
@@ -614,7 +1076,7 @@ export class ParlySDK {
       }
 
       const circuitInputs = {
-        root: BigInt(tree.root).toString(),
+        root: treePath.root.toString(),
         nullifierHash: BigInt(best.nullifierHash).toString(),
         protocol_fee: protocolFee.toString(),
         executor_fee: executorFee.toString(),
@@ -638,8 +1100,8 @@ export class ParlySDK {
         secret: best.payload.secret,
         nullifier: best.payload.nullifier,
         depositor: BigInt(best.payload.depositor).toString(),
-        pathElements: pathElements.map((element) => BigInt(element).toString()),
-        pathIndices,
+        pathElements: treePath.pathElements.map((element) => element.toString()),
+        pathIndices: treePath.pathIndices,
         new_change_secret: newChangeSecret,
         new_change_nullifier: newChangeNullifier
       }
@@ -664,28 +1126,14 @@ export class ParlySDK {
       const pC = [BigInt(proof.pi_c[0]), BigInt(proof.pi_c[1])] as [bigint, bigint]
 
       const mappedSignals = publicSignals.map((signal: string) => BigInt(signal))
-      const receiptTimeoutMs = resolveReceiptTimeoutMs()
-
-      if (quotedCrossChainFee > 0n) {
-        approvalToken = (await this.publicClient.readContract({
-          address: params.poolAddress,
-          abi: POOL_ABI,
-          functionName: "lzFeeToken"
-        })) as `0x${string}`
-
-        await safeApproveExactSdk({
-          token: approvalToken,
-          spender: params.poolAddress,
-          amount: quotedCrossChainFee,
-          owner: this.account.address,
-          publicClient: this.publicClient,
-          walletClient: this.walletClient
-        })
+      if (mappedSignals[11] !== treePath.root) {
+        throw new Error("Generated proof root does not match the selected private balance.")
       }
+      const receiptTimeoutMs = resolveReceiptTimeoutMs()
 
       submittedHash = await this.walletClient.writeContract({
         address: params.poolAddress,
-        abi: POOL_ABI,
+        abi: tempoShieldedPoolV2Abi,
         functionName: "batchWithdraw",
         args: [
           pA,
@@ -696,8 +1144,7 @@ export class ParlySDK {
           [...outputAmounts, ...Array(10 - outputs.length).fill(0n)],
           [...outputs.map((output) => output.destinationEid), ...Array(10 - outputs.length).fill(localEid)],
           newChangeCommitment,
-          newChangeEnvelope,
-          [option, ...Array(9).fill("0x")]
+          newChangeEnvelope
         ]
       })
 

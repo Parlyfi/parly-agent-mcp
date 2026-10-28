@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import {
   ParlyMppAdapter,
   ParlySDK,
+  type ExecuteCrossChainPayoutParams,
   type ExecuteBatchPaymentParams,
   type ExecutePaymentParams,
   type ExecutePaymentOutcome,
@@ -13,14 +14,17 @@ import { z } from "zod"
 import { assertMcpConfig, type McpRuntimeConfig } from "./smoke-config.js"
 import { ParlyWebApiClient } from "./web-api-client.js"
 
-const MCP_VERSION = "16.9.9-mcp.0"
+const MCP_VERSION = "16.9.10-mcp.0"
 const MCP_NAME = "parly-mcp"
 const MCP_SUPPORTED_TOOLS = [
   "recover_largest_note",
+  "get_private_balance",
+  "prepare_private_send",
   "preflight_shielded_payment",
   "send_shielded_payment",
   "preflight_batch_shielded_payment",
   "send_batch_shielded_payment",
+  "send_cross_chain_shielded_payment",
   "execute_shielded_payment",
   "mpp_create_session",
   "mpp_preflight_session_payment",
@@ -48,6 +52,7 @@ const MCP_WEB_API_TOOLS = [
   "payment_status_read",
   "payer_history_read",
   "payout_status_read",
+  "payout_receipt_read",
   "refund_claim",
   "receipt_download_url",
   "download_receipt_url",
@@ -92,7 +97,19 @@ const shieldedPaymentSchema = z.object({
   assetId: assetIdSchema,
   destinationEid: z.number().int().positive(),
   poolAddress: addressSchema,
+  poolVersion: z.union([z.literal(2), z.literal(3)]).optional(),
+  finalFees: amountSchema.or(z.literal("0")).optional(),
+  consolidationFee: amountSchema.or(z.literal("0")).optional(),
   proofAssetsBasePath: z.string().min(1).optional()
+})
+const privateBalanceSchema = z.object({
+  assetId: assetIdSchema,
+  poolAddress: addressSchema
+})
+const privateSendPlanSchema = privateBalanceSchema.extend({
+  amount: amountSchema,
+  finalFees: amountSchema.or(z.literal("0")).optional(),
+  consolidationFee: amountSchema.or(z.literal("0")).optional()
 })
 const batchShieldedPaymentSchema = z.object({
   outputs: z.array(
@@ -106,6 +123,15 @@ const batchShieldedPaymentSchema = z.object({
   poolAddress: addressSchema,
   proofAssetsBasePath: z.string().min(1).optional()
 })
+const crossChainShieldedPaymentSchema = z.object({
+  destinationChainId: z.number().int().positive(),
+  destinationToken: addressSchema,
+  destinationRecipient: addressSchema,
+  amount: amountSchema,
+  assetId: assetIdSchema,
+  poolAddress: addressSchema,
+  proofAssetsBasePath: z.string().min(1).optional()
+})
 const webApiGetSchema = z.object({
   query: z.record(z.union([z.string(), z.number(), z.boolean()])).optional()
 })
@@ -115,13 +141,6 @@ const webApiPostSchema = z.object({
 const batchCsvSchema = z.object({
   csv: z.string().min(1)
 })
-
-function normalizeError(error: unknown) {
-  if (error instanceof Error) {
-    return error.message
-  }
-  return String(error)
-}
 
 function formatStableAmount(raw: bigint | string) {
   const amount = BigInt(raw)
@@ -143,7 +162,7 @@ function jsonToolResponse(payload: unknown) {
   }
 }
 
-function jsonToolError(tool: string, error: unknown) {
+function jsonToolError(tool: string, _error?: unknown) {
   return {
     content: [
       {
@@ -152,7 +171,7 @@ function jsonToolError(tool: string, error: unknown) {
           {
             status: "error",
             tool,
-            message: normalizeError(error)
+            message: "The operation failed. Check the operator configuration and transaction status before retrying."
           },
           null,
           2
@@ -178,7 +197,8 @@ function jsonResource(uri: string, payload: unknown) {
 function summarizeOutcome(outcome: ExecutePaymentOutcome) {
   if (outcome.kind === "success") {
     return {
-      ...outcome,
+      kind: outcome.kind,
+      hash: outcome.hash,
       verificationMode: "lane-scoped",
       followUp:
         "Use the confirmed Tempo transaction hash plus one disclosed child key to verify a single payout lane."
@@ -187,7 +207,10 @@ function summarizeOutcome(outcome: ExecutePaymentOutcome) {
 
   if (outcome.kind === "pending_confirmation") {
     return {
-      ...outcome,
+      kind: outcome.kind,
+      hash: outcome.hash,
+      message: "Awaiting transaction confirmation.",
+      persistedLocally: Boolean(outcome.persistedTo),
       verificationMode: "lane-scoped",
       followUp:
         "Wait for confirmation or run the pending reconciler. When finalized, use the Tempo transaction hash plus one disclosed child key to verify a single payout lane."
@@ -195,7 +218,9 @@ function summarizeOutcome(outcome: ExecutePaymentOutcome) {
   }
 
   return {
-    ...outcome,
+    kind: outcome.kind,
+    hash: outcome.hash,
+    message: "The transaction could not be completed.",
     verificationMode: "lane-scoped",
     followUp: null
   }
@@ -236,7 +261,8 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     tempoChainId: config.tempoChainId,
     tempoLzEid: config.settlementDomainId,
     ponderGraphqlUrl: config.ponderGraphqlUrl,
-    proofAssetsBasePath: config.proofAssetsBasePath
+    proofAssetsBasePath: config.proofAssetsBasePath,
+    webApiBaseUrl: config.webApiBaseUrl
   })
 
   const adapter =
@@ -254,11 +280,18 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
 
   const server = new McpServer({
     name: MCP_NAME,
+    title: "Agent Selfhost MCP",
     version: MCP_VERSION
   })
 
   const toolNames: string[] = []
   const resourceUris: string[] = []
+  const privateValues = [config.agentPrivateKey, config.tempoRpcUrl, config.ponderGraphqlUrl, config.proofAssetsBasePath, config.webApiBearerToken, env.MCP_HTTP_AUTH_TOKEN].filter((v): v is string => typeof v === "string" && v.length > 0)
+  function privateOutput(value: unknown): boolean {
+    if (typeof value === "string") return privateValues.some(secret => value.includes(secret))
+    if (Array.isArray(value)) return value.some(privateOutput)
+    return !!value && typeof value === "object" && Object.entries(value).some(([key, item]) => /^(?:privatekey(?:hex)?|agentprivatekey|spend(?:ing)?(?:key|scalar)|view(?:ing)?(?:key|scalar)|notesecret|recoverykey|encryptionkey|seedphrase|mnemonic|authorization|bearertoken|apikey)$/u.test(key.replace(/[-_]/g, "").toLowerCase()) || privateOutput(item))
+  }
 
   function registerTool(
     name: string,
@@ -270,7 +303,13 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     handler: (...args: any[]) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: true }>
   ) {
     toolNames.push(name)
-    server.registerTool(name, config, handler)
+    server.registerTool(name, config, async (...args: any[]) => {
+      try {
+        const response = await handler(...args)
+        if (response.content.some(item => item.type === "text" && privateOutput(JSON.parse(item.text)))) return jsonToolError(name)
+        return response
+      } catch { return jsonToolError(name) }
+    })
   }
 
   function registerStaticResource(
@@ -296,10 +335,11 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
   registerStaticResource(
     "launch-context",
     "parly://launch-context",
-    "Parly MCP Launch Context",
+    "Agent Selfhost MCP Launch Context",
     "Current launch context and supported public surfaces for this MCP runtime.",
     () => ({
-      ...sdk.getLaunchContext(),
+      tempoChainId: config.tempoChainId,
+      tempoLzEid: config.settlementDomainId,
       mcpVersion: MCP_VERSION,
       supportedTools: adapter ? [...MCP_SUPPORTED_TOOLS] : MCP_SUPPORTED_TOOLS.filter((tool) => !tool.startsWith("mpp_")),
       webApiTools: webApi ? [...MCP_WEB_API_TOOLS] : [],
@@ -312,7 +352,7 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
   registerStaticResource(
     "security-notes",
     "parly://security-notes",
-    "Parly MCP Security Notes",
+    "Agent Selfhost MCP Security Notes",
     "Agent-only authority, payout-scope verification notes, and runtime constraints.",
     () => ({
       authority: "AGENT_PRIVATE_KEY only",
@@ -370,19 +410,13 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
           status: "ok",
           tool: "recover_largest_note",
           assetId,
-          recoveryMode: "asymmetric-chain-envelope",
-          verificationMode: "lane-scoped selective disclosure",
-          recoveryPublicKeyB64: recovered.kp.publicKeyB64,
+          poolVersion: 2,
+          historyCompatibility: "historical_v2",
           noteFound: Boolean(recovered.best),
-          leafCount: recovered.leaves.length,
           bestNote: recovered.best
             ? {
                 amount: recovered.best.amount.toString(),
-                amountFormatted: formatStableAmount(recovered.best.amount),
-                commitment: recovered.best.commitment,
-                nullifierHash: recovered.best.nullifierHash,
-                depositor: recovered.best.payload.depositor,
-                kind: recovered.best.payload.kind
+                amountFormatted: formatStableAmount(recovered.best.amount)
               }
             : null
         })
@@ -392,15 +426,66 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     }
   )
 
+  registerTool(
+    "get_private_balance",
+    {
+      title: "Get Private Balance",
+      description:
+        "Return the PoolV3 total private balance, immediately spendable amount, note count, and consolidation requirement without note identifiers.",
+      inputSchema: privateBalanceSchema
+    },
+    async (args) => {
+      try {
+        const balance = await sdk.getPrivateBalance(args)
+        return jsonToolResponse({
+          status: "ok",
+          tool: "get_private_balance",
+          balance
+        })
+      } catch (error) {
+        return jsonToolError("get_private_balance", error)
+      }
+    }
+  )
+
+  registerTool(
+    "prepare_private_send",
+    {
+      title: "Prepare Private Send",
+      description:
+        "Automatically plan a deterministic PoolV3 spend and report whether consolidation is required without exposing note or proof internals.",
+      inputSchema: privateSendPlanSchema
+    },
+    async (args) => {
+      try {
+        const plan = await sdk.preparePrivateSend(args)
+        return jsonToolResponse({
+          status: "ok",
+          tool: "prepare_private_send",
+          plan
+        })
+      } catch (error) {
+        return jsonToolError("prepare_private_send", error)
+      }
+    }
+  )
+
   async function handleShieldedPaymentTool(
     tool: "send_shielded_payment" | "execute_shielded_payment",
     args: z.infer<typeof shieldedPaymentSchema>
   ) {
     try {
+      if (args.poolVersion === 3) {
+        throw new Error(
+          "PoolV3 execution is not available through this legacy send tool. Use prepare_private_send for a redacted PoolV3 plan."
+        )
+      }
       const outcome = await sdk.sendShieldedPayment(args as ExecutePaymentParams)
       return jsonToolResponse({
         status: "ok",
         tool,
+        poolVersion: 2,
+        historyCompatibility: "historical_v2",
         routeMode:
           args.destinationEid === config.settlementDomainId
             ? "same-chain"
@@ -427,21 +512,40 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
         "Validate one shielded payment request and route shape before proof generation or transaction submission.",
       inputSchema: shieldedPaymentSchema
     },
-    async (args) =>
-      jsonToolResponse({
-        status: "ok",
-        tool: "preflight_shielded_payment",
-        preflight: {
-          ...preflightRouteMode([args.destinationEid], config.settlementDomainId),
-          settlementChainId: config.tempoChainId,
-          settlementEid: config.settlementDomainId,
-          assetId: args.assetId,
-          amount: args.amount,
-          poolAddress: args.poolAddress,
-          destination: args.destination,
-          destinationEid: args.destinationEid
-        }
-      })
+    async (args) => {
+      try {
+        const privateBalancePlan =
+          args.poolVersion === 3
+            ? await sdk.preparePrivateSend({
+                assetId: args.assetId,
+                poolAddress: args.poolAddress,
+                amount: args.amount,
+                finalFees: args.finalFees,
+                consolidationFee: args.consolidationFee
+              })
+            : null
+        return jsonToolResponse({
+          status: "ok",
+          tool: "preflight_shielded_payment",
+          preflight: {
+            ...preflightRouteMode([args.destinationEid], config.settlementDomainId),
+            settlementChainId: config.tempoChainId,
+            settlementEid: config.settlementDomainId,
+            assetId: args.assetId,
+            amount: args.amount,
+            poolAddress: args.poolAddress,
+            destination: args.destination,
+            destinationEid: args.destinationEid,
+            poolVersion: args.poolVersion ?? 2,
+            historyCompatibility:
+              args.poolVersion === 3 ? "pool_v2_read_only" : "historical_v2",
+            ...(privateBalancePlan ? { privateBalancePlan } : {})
+          }
+        })
+      } catch (error) {
+        return jsonToolError("preflight_shielded_payment", error)
+      }
+    }
   )
 
   registerTool(
@@ -506,6 +610,35 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
         })
       } catch (error) {
         return jsonToolError("send_batch_shielded_payment", error)
+      }
+    }
+  )
+
+  registerTool(
+    "send_cross_chain_shielded_payment",
+    {
+      title: "Send Cross-Chain Shielded Payment",
+      description:
+        "Send one private payout to a supported destination network. The result is a pending lifecycle reference, not a claim of destination delivery.",
+      inputSchema: crossChainShieldedPaymentSchema
+    },
+    async (args) => {
+      try {
+        const outcome = await sdk.sendCrossChainShieldedPayment(args as ExecuteCrossChainPayoutParams)
+        if (outcome.kind === "terminal_failure") {
+          return jsonToolError("send_cross_chain_shielded_payment", outcome.message)
+        }
+        return jsonToolResponse({
+          status: "submitted",
+          tool: "send_cross_chain_shielded_payment",
+          payoutId: outcome.payoutId,
+          supportReference: outcome.supportReference,
+          statusAccessToken: outcome.statusAccessToken,
+          lifecycle: "pending",
+          followUp: "Use payout_status_read until objective destination completion or a claimant-bound refund is confirmed."
+        })
+      } catch (error) {
+        return jsonToolError("send_cross_chain_shielded_payment", error)
       }
     }
   )
@@ -590,7 +723,8 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
           return jsonToolResponse({
             status: "ok",
             tool: "mpp_settle_session_payment",
-            boundary: "sdk-mcp-only",
+            poolVersion: 2,
+            historyCompatibility: "historical_v2",
             sessionId: session.sessionId,
             outcome: summarizeOutcome(outcome)
           })
@@ -609,31 +743,43 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
         inputSchema: z.object({
           session: mppSessionSchema,
           destination: addressSchema,
-          amount: amountSchema
+          amount: amountSchema,
+          poolVersion: z.union([z.literal(2), z.literal(3)]).optional(),
+          finalFees: amountSchema.or(z.literal("0")).optional(),
+          consolidationFee: amountSchema.or(z.literal("0")).optional()
         })
       },
       async ({
         session,
         destination,
-        amount
+        amount,
+        poolVersion,
+        finalFees,
+        consolidationFee
       }: {
         session: MppSessionRecord
         destination: `0x${string}`
         amount: string
+        poolVersion?: 2 | 3
+        finalFees?: string
+        consolidationFee?: string
       }) => {
         try {
+          const request = {
+            sessionId: session.sessionId,
+            destination,
+            amount
+          }
           return jsonToolResponse({
             status: "ok",
             tool: "mpp_preflight_session_payment",
-            boundary: "sdk-mcp-only",
-            preflight: adapter.preflightSessionPayment(
-              {
-                sessionId: session.sessionId,
-                destination,
-                amount
-              },
-              session
-            )
+            preflight:
+              poolVersion === 3
+                ? await adapter.preflightPoolV3SessionPayment(request, session, {
+                    finalFees,
+                    consolidationFee
+                  })
+                : adapter.preflightSessionPayment(request, session)
           })
         } catch (error) {
           return jsonToolError("mpp_preflight_session_payment", error)
@@ -726,6 +872,10 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     title: "Read Payout Status",
     description: "Read public payout lifecycle status without exposing unrelated private lanes."
   }, { method: "POST", path: "/api/phase3/payout-status" })
+  registerWebApiTool("payout_receipt_read", {
+    title: "Read Completed Payout Receipt",
+    description: "Read a payout receipt only after objective completion or refund evidence is available."
+  }, { method: "POST", path: "/api/phase3/payout-receipt" })
   registerWebApiTool("refund_claim", {
     title: "Claim Failed-Payment Refund",
     description: "Submit a claimant-bound refund request through the existing refund API."

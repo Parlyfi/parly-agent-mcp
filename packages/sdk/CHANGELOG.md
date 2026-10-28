@@ -6,3 +6,5 @@
 - added a bounded 10-lane same-chain batch send wrapper
 - added counterparty-locked MPP session preflight before proof generation or transaction submission
 - kept `executeShieldedPayment()` as a compatibility alias for `sendShieldedPayment()`
+- added redacted PoolV3 total-balance and deterministic private-send preparation
+- kept PoolV2 history explicit and read-only in PoolV3 planning

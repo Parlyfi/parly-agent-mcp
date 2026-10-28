@@ -36,8 +36,45 @@ test("MCP exposes shielded payment preflight without proof or transaction submis
   assert.doesNotMatch(preflightBlock, /sendShieldedPayment|executeAgenticPayment|writeContract|sendTransaction|fullProve/u)
 })
 
+test("MCP exposes redacted PoolV3 balance and deterministic preparation", () => {
+  assert.match(runtimeSource, /get_private_balance/u)
+  assert.match(runtimeSource, /sdk\.getPrivateBalance/u)
+  assert.match(runtimeSource, /prepare_private_send/u)
+  assert.match(runtimeSource, /sdk\.preparePrivateSend/u)
+  assert.match(runtimeSource, /pool_v2_read_only/u)
+
+  const recoveryBlock =
+    runtimeSource.match(/"recover_largest_note"[\s\S]*?"get_private_balance"/u)?.[0] ?? ""
+  assert.doesNotMatch(
+    recoveryBlock,
+    /recoveryPublicKeyB64|nullifierHash|commitment|depositor|merklePath|noteSecret|privateKeyB64/u
+  )
+
+  const publicPlanBlock =
+    runtimeSource.match(/"get_private_balance"[\s\S]*?async function handleShieldedPaymentTool/u)?.[0] ?? ""
+  assert.doesNotMatch(
+    publicPlanBlock,
+    /recoveryPublicKeyB64|nullifierHash|commitment|depositor|merklePath|noteSecret|privateKeyB64/u
+  )
+})
+
+test("MPP PoolV3 preflight returns only the redacted SDK plan", () => {
+  assert.match(runtimeSource, /preflightPoolV3SessionPayment/u)
+  assert.match(runtimeSource, /privateBalancePlan/u)
+  const preflightBlock =
+    runtimeSource.match(/"mpp_preflight_session_payment"[\s\S]*?jsonToolError\("mpp_preflight_session_payment"/u)?.[0] ?? ""
+  assert.doesNotMatch(
+    preflightBlock,
+    /recoveryPublicKeyB64|nullifierHash|commitment|merklePath|noteSecret|privateKeyB64/u
+  )
+})
+
 test("MCP exposes Send naming while keeping the legacy execute alias", () => {
   assert.match(runtimeSource, /send_shielded_payment/u)
+  assert.match(runtimeSource, /send_cross_chain_shielded_payment/u)
+  assert.match(runtimeSource, /sdk\.sendCrossChainShieldedPayment/u)
+  assert.match(runtimeSource, /lifecycle: "pending"/u)
+  assert.doesNotMatch(runtimeSource, /outcome\.recovery|refundSalt/u)
   assert.match(runtimeSource, /send_batch_shielded_payment/u)
   assert.match(runtimeSource, /execute_shielded_payment/u)
   assert.match(runtimeSource, /Compatibility alias for send_shielded_payment/u)
@@ -63,6 +100,7 @@ test("MCP web API tools are named Parly routes, not an arbitrary proxy", () => {
   assert.match(runtimeSource, /payer_history_read/u)
   assert.match(runtimeSource, /receipt_download_url/u)
   assert.match(runtimeSource, /verify_invoice_receipt/u)
+  assert.match(runtimeSource, /payout_receipt_read/u)
   assert.match(runtimeSource, /ui_settings_read/u)
   assert.match(runtimeSource, /PARLY_WEB_API_BASE_URL|webApiEnabled/u)
   assert.doesNotMatch(runtimeSource, /admin_operations_summary|admin_operations_action/u)

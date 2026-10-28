@@ -40,6 +40,21 @@ test("SDK exposes a bounded 10-lane batch send wrapper", () => {
   assert.match(coreSource, /Cross-chain private sends are not enabled/u)
 })
 
+test("SDK exposes the V5 cross-chain payout workflow without authority controls", () => {
+  assert.match(coreSource, /sendCrossChainShieldedPayment/u)
+  assert.match(coreSource, /buildPayoutV5PoolPayload/u)
+  assert.match(coreSource, /relayer: BigInt\(getAddress\(args\.quote\.withdrawalExecutor\)\)/u)
+  assert.match(coreSource, /storePayoutRecoveryCapsule/u)
+  assert.match(coreSource, /attachCrossChainPayoutProof/u)
+  assert.ok(
+    coreSource.indexOf("storePayoutRecoveryCapsule") < coreSource.indexOf("attachCrossChainPayoutProof"),
+    "wallet-encrypted recovery must be persisted before the proof becomes executable"
+  )
+  const capsuleBlock = coreSource.match(/const capsule = \{[\s\S]*?\n      \} as const/u)?.[0] ?? ""
+  assert.doesNotMatch(capsuleBlock, /refundSalt|sourceNoteSecret|sourceNoteNullifier\s*:/u)
+  assert.doesNotMatch(coreSource, /setProvider|setSigner|setThreshold|setExecutionEnabled|fundCollateral/u)
+})
+
 test("SDK exposes public Privacy Links create and edit helpers without admin controls", () => {
   assert.match(indexSource, /public-api\.js/u)
   for (const symbol of [
@@ -75,6 +90,12 @@ test("SDK public API client exposes product methods, not arbitrary HTTP primitiv
     "readPaymentStatus",
     "readPayerHistory",
     "readPayoutStatus",
+    "quoteCrossChainPayout",
+    "authorizeCrossChainPayout",
+    "attachCrossChainPayoutProof",
+    "storePayoutRecoveryCapsule",
+    "readCrossChainPayoutReceipt",
+    "preparePayoutV5RefundCalls",
     "claimRefund",
     "createReceiptDownloadUrl",
     "verifyPayoutScope",

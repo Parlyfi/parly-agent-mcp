@@ -11,7 +11,8 @@ jobs:
       AGENT_PRIVATE_KEY: 0x1111111111111111111111111111111111111111111111111111111111111111
       TEMPO_RPC_URL: https://rpc.example.tempo.xyz
       TEMPO_CHAIN_ID: "4217"
-      TEMPO_LZ_EID: ${{ vars.TEMPO_LZ_EID }}
+      MCP_TEMPO_PROFILE: phase3-tempo4217
+      SETTLEMENT_DOMAIN_ID: "4217"
       ENABLE_MPP_ADAPTER: "true"
       MPP_SERVICE_NAME: parly-mpp-adapter
       MPP_SERVICE_VERSION: 16.9.9
@@ -23,6 +24,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm smoke:standalone

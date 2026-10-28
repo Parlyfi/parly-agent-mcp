@@ -11,7 +11,11 @@ Parly private balance. It supports the two Phase 3 asset lanes:
 ## Core APIs
 
 - `ParlySDK.fromEnv()` creates an SDK client from server-side environment variables.
-- `recoverLargestNote(assetId, poolAddress)` finds the largest live note for an asset lane.
+- `getPrivateBalance(params)` returns six-decimal PoolV3 base-unit totals, note count, and the
+  consolidation requirement.
+- `preparePrivateSend(params)` automatically selects the deterministic PoolV3 input set and returns
+  one redacted spend or consolidation summary.
+- `recoverLargestNote(assetId, poolAddress)` remains available for historical PoolV2 recovery.
 - `sendShieldedPayment(params)` sends from a recovered private note.
 - `sendShieldedBatchPayment(params)` sends up to 10 same-chain private payout lanes from one note.
 - `executeShieldedPayment(params)` remains as a compatibility alias for older integrations.
@@ -26,6 +30,11 @@ authority. Use:
 - `preflightSessionPayment()` to validate session ID, counterparty, amount, asset, destination, and
   spend limit before proof work.
 - `settleFromSession()` to execute the payment through the same SDK path as `sendShieldedPayment()`.
+- `preflightPoolV3SessionPayment()` to add a redacted PoolV3 balance plan without returning note
+  identifiers or proof material.
+
+PoolV3 preparation never returns note secrets, commitments, nullifiers, Merkle paths, or recovery
+keys. PoolV2 history remains readable for recovery, but it is not mixed into PoolV3 selection.
 
 ## Environment
 

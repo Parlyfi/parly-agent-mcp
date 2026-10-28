@@ -1,12 +1,14 @@
 {
   "name": "@parly/mcp-server",
-  "version": "16.9.9-mcp.0",
+  "description": "Parly Unhosted MCP: operator-controlled agent-wallet tools.",
+  "version": "16.9.10-mcp.0",
   "private": true,
   "scripts": {
     "build:deps": "pnpm --filter @parly/env-utils run build && pnpm --filter @parly/shared-types run build && pnpm --filter @parly/protocol-abis run build && pnpm --filter @parly/crypto-utils run build && pnpm --filter @parly/sdk run build",
     "build": "pnpm run build:deps && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
+    "test:security": "node --test script/http-security-tests.mjs script/mcp-readiness-tests.mjs script/web-api-security-tests.mjs",
     "start": "pnpm run build && node ./script/sync-workspace-dist.mjs && node dist/apps/mcp-server/src/index.js",
     "smoke:config": "node dist/apps/mcp-server/src/smoke-config.js",
     "smoke:tools": "node dist/apps/mcp-server/src/smoke-tools.js",

@@ -1,6 +1,6 @@
 {
   "name": "@parly/sdk",
-  "version": "16.9.9",
+  "version": "16.9.10",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -14,6 +14,18 @@
       "types": "./dist/lz-options.d.ts",
       "default": "./dist/lz-options.js"
     },
+    "./coin-selection": {
+      "types": "./dist/coin-selection.d.ts",
+      "default": "./dist/coin-selection.js"
+    },
+    "./payout-v7": {
+      "types": "./dist/payout-v7.d.ts",
+      "default": "./dist/payout-v7.js"
+    },
+    "./payout-v6": {
+      "types": "./dist/payout-v6.d.ts",
+      "default": "./dist/payout-v6.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -25,13 +37,14 @@
     "examples"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ./scripts/flatten-dist.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
+    "test:security": "node --test scripts/launch-context-redaction.test.mjs",
     "sync:proof-assets": "node ./scripts/sync-proof-assets.mjs",
     "test:lz-options": "pnpm run build && node ./scripts/verify-lz-options.mjs",
-    "test:phase3-legacy-gates": "node --test scripts/phase3-legacy-gates.test.mjs",
-    "pack:dry-run": "pnpm publish --dry-run --no-git-checks"
+    "test:phase3-legacy-gates": "pnpm --filter @parly/shared-types run build && pnpm run build && node --test scripts/phase3-legacy-gates.test.mjs scripts/phase3-payout-v5.test.mjs",
+    "pack:dry-run": "npm pack --dry-run --ignore-scripts"
   },
   "dependencies": {
     "@parly/crypto-utils": "workspace:*",

@@ -54,6 +54,201 @@ export type BatchCsvRow = {
   asset: string
 }
 
+export type PayoutV5QuoteInput = {
+  assetId: 1 | 2
+  sourcePool: `0x${string}`
+  destinationChainId: number
+  destinationToken: `0x${string}`
+  destinationRecipient: `0x${string}`
+  amountOutBaseUnits: string
+  refundWallet: `0x${string}`
+  refundRecipientCommitment: `0x${string}`
+  escrowSalt: `0x${string}`
+}
+
+export type PayoutV5QuoteAuthorization = {
+  wallet: `0x${string}`
+  issuedAt: number
+  nonce: string
+  signature: `0x${string}`
+}
+
+export type PayoutV5Quote = {
+  quoteHash: `0x${string}`
+  assetId: 1 | 2
+  sourcePool: `0x${string}`
+  sourceToken: `0x${string}`
+  adapter: `0x${string}`
+  withdrawalExecutor: `0x${string}`
+  escrow: `0x${string}`
+  escrowAmountBaseUnits: string
+  executorFeeBaseUnits: string
+  protocolFeeBaseUnits: string
+  destinationChainId: number
+  destinationToken: `0x${string}`
+  destinationRecipient: `0x${string}`
+  destinationAmountOutBaseUnits: string
+  relaySourceAmountBaseUnits: string
+  relayRouteCostBaseUnits: string
+  submissionReimbursementBaseUnits: string
+  deliverySuccessFeeBaseUnits: string
+  maximumOperatorFeeBaseUnits: string
+  primaryRefundToken: `0x${string}`
+  secondaryRefundToken: `0x${string}`
+  refundRecipientCommitment: `0x${string}`
+  requestIdHash: `0x${string}`
+  refundRouteBindingHash: `0x${string}`
+  quoteExpiresAt: number
+  preSubmissionRecoveryDelaySeconds: number
+  maximumCompletionDelaySeconds: number
+  totalNeededFromNoteBaseUnits: string
+}
+
+export type PayoutV5Acceptance = {
+  payoutId: `phase3-payout-v5:${string}`
+  intentHash: `0x${string}`
+  statusAccessToken: string
+  supportReference: string
+  adapter: `0x${string}`
+  withdrawalExecutor: `0x${string}`
+  escrow: `0x${string}`
+  escrowAmountBaseUnits: string
+  executorFeeBaseUnits: string
+  quoteExpiresAt: number
+}
+
+export type PayoutV5RecoveryAction =
+  | "none"
+  | "waiting"
+  | "make_refund_available"
+  | "claim_refund"
+  | "refunded"
+
+export type PayoutV5PublicStatus = {
+  adapterVersion?: "v5"
+  payoutId?: `phase3-payout-v5:${string}`
+  status?: string
+  statusLabel?: string
+  progressStep?: number
+  recoveryAction?: PayoutV5RecoveryAction
+  recoveryAvailableAt?: number
+  recoveryMatured?: boolean
+  refundEligible?: boolean
+  supportReference?: string
+  lastCheckedAt?: string | null
+  nextCheckAt?: string | null
+  expectedDeliveryAt?: string | null
+  [key: string]: unknown
+}
+
+export type PayoutV5UnsignedRefundCall = {
+  to: `0x${string}`
+  functionName: "makeEscrowRefundAvailableAfterDeadline" | "claimRefund"
+  args: readonly [`0x${string}`] | readonly [`0x${string}`, `0x${string}`]
+}
+
+export type PayoutV6ChildQuoteInput = {
+  destinationChainId: number
+  destinationToken: `0x${string}`
+  destinationRecipient: `0x${string}`
+  amountOutBaseUnits: string
+  refundWallet: `0x${string}`
+  refundRecipientCommitment: `0x${string}`
+  escrowSalt: `0x${string}`
+}
+
+export type PayoutV6QuoteInput = {
+  assetId: 1 | 2
+  sourcePool: `0x${string}`
+  children: readonly PayoutV6ChildQuoteInput[]
+}
+
+export type PayoutV6ChildManifest = {
+  intentHash: `0x${string}`
+  escrow: `0x${string}`
+  escrowAmountBaseUnits: string
+  sourceExecutorFeeAllocationBaseUnits: string
+  destinationChainId: number
+  destinationToken: `0x${string}`
+  destinationRecipient: `0x${string}`
+  destinationAmountOutBaseUnits: string
+  relaySourceAmountBaseUnits: string
+  relayRouteCostBaseUnits: string
+  submissionReimbursementBaseUnits: string
+  deliverySuccessFeeBaseUnits: string
+  refundRecipientCommitment: `0x${string}`
+  requestIdHash: `0x${string}`
+  refundRouteBindingHash: `0x${string}`
+}
+
+export type PayoutV6Manifest = {
+  version: 6
+  manifestHash: `0x${string}`
+  clientAuthorizationId: `0x${string}`
+  adapter: `0x${string}`
+  withdrawalExecutor: `0x${string}`
+  selectedRelayer: `0x${string}`
+  relayerPublicKeyHash: `0x${string}`
+  sourcePool: `0x${string}`
+  sourceToken: `0x${string}`
+  assetId: 1 | 2
+  inputCount: 1 | 2 | 3 | 4
+  sourceCallHash: `0x${string}`
+  sealedExecutionPayloadHash: `0x${string}`
+  protocolFeeBaseUnits: string
+  sourceExecutorFeeBaseUnits: string
+  totalDestinationAmountBaseUnits: string
+  totalEscrowAmountBaseUnits: string
+  maximumTotalNoteDeductionBaseUnits: string
+  quoteExpiresAt: number
+  preSubmissionRecoveryDelaySeconds: number
+  children: readonly PayoutV6ChildManifest[]
+}
+
+export type PayoutV6PreparationInput = {
+  quoteSessionId: string
+  clientAuthorizationId: `0x${string}`
+  inputCount: 1 | 2 | 3 | 4
+  sourceCallHash: `0x${string}`
+  sealedExecutionPayload: `0x${string}`
+  selectedRelayer: `0x${string}`
+  relayerPublicKeyHash: `0x${string}`
+  protocolFeeBaseUnits: string
+  sourceExecutorFeeBaseUnits: string
+  sourceFeeAllocationsBaseUnits: readonly string[]
+  maximumTotalNoteDeductionBaseUnits: string
+  refundRecipientCommitments: readonly `0x${string}`[]
+}
+
+export type PayoutV6Authorization = PayoutV5QuoteAuthorization
+
+export type PayoutV6Acceptance = {
+  manifestHash: `0x${string}`
+  batchGroupHash: `0x${string}`
+  adapter: `0x${string}`
+  withdrawalExecutor: `0x${string}`
+  children: readonly PayoutV5Acceptance[]
+}
+
+export type PayoutV6RecoveryAction =
+  | "none"
+  | "waiting"
+  | "claim_pre_submission_refund"
+  | "claim_refund"
+  | "refunded"
+
+export type PayoutV6PublicStatus = PayoutV5PublicStatus & {
+  adapterVersion?: "v6"
+  recoveryAction?: PayoutV6RecoveryAction
+  receiptAvailable?: boolean
+}
+
+export type PayoutV6UnsignedRefundCall = {
+  to: `0x${string}`
+  functionName: "claimPreSubmissionRefundAfterMaturity" | "claimRefund"
+  args: readonly [`0x${string}`, `0x${string}`]
+}
+
 export class ParlyPublicApiClient {
   constructor(
     private readonly baseUrl: string,
@@ -173,7 +368,127 @@ export class ParlyPublicApiClient {
   }
 
   readPayoutStatus(body: { statusAccessToken: string }) {
-    return this.post<PublicApiResponse<Record<string, unknown>>>("/api/phase3/payout-status", body)
+    return this.post<PublicApiResponse<PayoutV5PublicStatus>>("/api/phase3/payout-status", body)
+  }
+
+  quoteCrossChainPayout(body: PayoutV5QuoteInput) {
+    return this.post<PublicApiResponse<{ quote: PayoutV5Quote }>>("/api/phase3/payout-v5/quote", body)
+  }
+
+  quoteCrossChainPayoutV6(body: PayoutV6QuoteInput) {
+    return this.post<PublicApiResponse<{ quoteSessionId: string; quote: Record<string, unknown> }>>(
+      "/api/phase3/payout-v6/quote",
+      body
+    )
+  }
+
+  prepareCrossChainPayoutV6(body: PayoutV6PreparationInput) {
+    return this.post<PublicApiResponse<{ manifest: PayoutV6Manifest }>>(
+      "/api/phase3/payout-v6/preparation",
+      body
+    )
+  }
+
+  authorizeCrossChainPayoutV6(body: {
+    manifestHash: `0x${string}`
+    authorization: PayoutV6Authorization
+  }) {
+    return this.post<PublicApiResponse<{ payout: PayoutV6Acceptance }>>(
+      "/api/phase3/payout-v6/accept",
+      body
+    )
+  }
+
+  authorizeCrossChainPayoutV6Batch(body: {
+    manifestHash: `0x${string}`
+    authorization: PayoutV6Authorization
+  }) {
+    return this.post<PublicApiResponse<{ payout: PayoutV6Acceptance }>>(
+      "/api/phase3/payout-v6/batch/accept",
+      body
+    )
+  }
+
+  readPayoutV6Status(body: { statusAccessToken: string }) {
+    return this.post<PublicApiResponse<PayoutV6PublicStatus>>("/api/phase3/payout-v6/status", body)
+  }
+
+  storePayoutV6RecoveryCapsule(body: {
+    statusAccessToken: string
+    recoveryKeyHash: string
+    sealedPayload: `0x${string}`
+  }) {
+    return this.postWithBearer<PublicApiResponse<{ ok: true }>>(
+      "/api/phase3/payout-v6/recovery",
+      body.statusAccessToken,
+      { recoveryKeyHash: body.recoveryKeyHash, sealedPayload: body.sealedPayload }
+    )
+  }
+
+  preparePayoutV6RefundCall(input: {
+    adapter: `0x${string}`
+    intentHash: `0x${string}`
+    refundSalt: `0x${string}`
+    recoveryAction: PayoutV6RecoveryAction
+  }): PayoutV6UnsignedRefundCall[] {
+    if (input.recoveryAction !== "claim_pre_submission_refund" && input.recoveryAction !== "claim_refund") return []
+    return [{
+      to: input.adapter,
+      functionName: input.recoveryAction === "claim_pre_submission_refund"
+        ? "claimPreSubmissionRefundAfterMaturity"
+        : "claimRefund",
+      args: [input.intentHash, input.refundSalt]
+    }]
+  }
+
+  authorizeCrossChainPayout(body: { quoteHash: `0x${string}`; authorization: PayoutV5QuoteAuthorization }) {
+    return this.post<PublicApiResponse<{ payout: PayoutV5Acceptance }>>("/api/phase3/payout-v5/accept", body)
+  }
+
+  attachCrossChainPayoutProof(body: { statusAccessToken: string; payload: Record<string, unknown> }) {
+    return this.postWithBearer<PublicApiResponse<{ ok: true }>>(
+      "/api/phase3/payout-v5/preparation",
+      body.statusAccessToken,
+      { payload: body.payload }
+    )
+  }
+
+  storePayoutRecoveryCapsule(body: {
+    statusAccessToken: string
+    adapterVersion: "v5"
+    recoveryKeyHash: string
+    sealedPayload: `0x${string}`
+  }) {
+    return this.postWithBearer<PublicApiResponse<{ ok: true }>>(
+      "/api/phase3/payout-recovery",
+      body.statusAccessToken,
+      {
+        adapterVersion: body.adapterVersion,
+        recoveryKeyHash: body.recoveryKeyHash,
+        sealedPayload: body.sealedPayload
+      }
+    )
+  }
+
+  readCrossChainPayoutReceipt(body: { statusAccessToken: string }) {
+    return this.post<PublicApiResponse<{ manifest: Record<string, unknown> }>>("/api/phase3/payout-receipt", body)
+  }
+
+  preparePayoutV5RefundCalls(input: {
+    adapter: `0x${string}`
+    intentHash: `0x${string}`
+    refundSalt: `0x${string}`
+    recoveryAction: PayoutV5RecoveryAction
+  }): PayoutV5UnsignedRefundCall[] {
+    if (input.recoveryAction === "refunded" || input.recoveryAction === "none" || input.recoveryAction === "waiting") return []
+    const claim: PayoutV5UnsignedRefundCall = {
+      to: input.adapter,
+      functionName: "claimRefund",
+      args: [input.intentHash, input.refundSalt]
+    }
+    return input.recoveryAction === "make_refund_available"
+      ? [{ to: input.adapter, functionName: "makeEscrowRefundAvailableAfterDeadline", args: [input.intentHash] }, claim]
+      : [claim]
   }
 
   readPayerHistory(body: Record<string, unknown>) {
@@ -248,13 +563,19 @@ export class ParlyPublicApiClient {
     return this.request<T>("POST", new URL(path, this.baseUrl), body)
   }
 
-  private async request<T>(method: "GET" | "POST", url: URL, body?: unknown): Promise<T> {
+  private async postWithBearer<T>(path: string, bearerToken: string, body: unknown = {}) {
+    return this.request<T>("POST", new URL(path, this.baseUrl), body, bearerToken)
+  }
+
+  private async request<T>(method: "GET" | "POST", url: URL, body?: unknown, bearerToken?: string): Promise<T> {
     const response = await fetch(url, {
       method,
       headers: {
         accept: "application/json",
         "content-type": "application/json",
-        ...(this.auth.bearerToken ? { authorization: `Bearer ${this.auth.bearerToken}` } : {})
+        ...(bearerToken || this.auth.bearerToken
+          ? { authorization: `Bearer ${bearerToken || this.auth.bearerToken}` }
+          : {})
       },
       body: body === undefined ? undefined : JSON.stringify(body)
     })

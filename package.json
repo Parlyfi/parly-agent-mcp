@@ -1,15 +1,17 @@
 {
   "name": "parly-mcp-repo",
+  "description": "Agent Selfhost MCP: developer-operated agent tools, separate from Hosted MCP.",
   "private": true,
   "packageManager": "pnpm@10.6.0",
   "scripts": {
     "lint": "pnpm -r --if-present run lint",
     "build": "pnpm -r --if-present run build",
     "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm --filter @parly/sdk run test:security && pnpm --filter @parly/mcp-server run test:security",
     "start": "pnpm --filter @parly/mcp-server run start",
     "smoke:config": "pnpm --filter @parly/mcp-server run smoke:config",
     "smoke:tools": "pnpm --filter @parly/mcp-server run smoke:tools",
-    "smoke:standalone": "pnpm lint && pnpm typecheck && pnpm build && pnpm smoke:config && pnpm smoke:tools"
+    "smoke:standalone": "pnpm lint && pnpm typecheck && pnpm build && pnpm test && pnpm smoke:config && pnpm smoke:tools"
   },
   "engines": {
     "node": ">=22"

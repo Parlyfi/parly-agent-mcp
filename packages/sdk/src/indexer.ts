@@ -93,6 +93,7 @@ export type RecoveryHeads = {
 
 type IndexerQueryOptions = {
   ponderUrl?: string
+  poolAddress?: string
 }
 
 function resolvePonderUrl(options: IndexerQueryOptions = {}): string {
@@ -108,6 +109,24 @@ function resolvePonderUrl(options: IndexerQueryOptions = {}): string {
   }
 
   return value
+}
+
+function resolveIndexerApiUrl(options: IndexerQueryOptions = {}): string {
+  return resolvePonderUrl(options).replace(/\/graphql\/?$/u, "").replace(/\/$/u, "")
+}
+
+async function fetchIndexerItems<T>(
+  path: string,
+  params: Record<string, string | number>,
+  options: IndexerQueryOptions
+): Promise<T[]> {
+  const url = new URL(`${resolveIndexerApiUrl(options)}${path}`)
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value))
+  url.searchParams.set("limit", "5000")
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`Indexer request failed with HTTP ${response.status}`)
+  const data = (await response.json()) as { items?: T[] }
+  return data.items || []
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -158,6 +177,7 @@ async function fetchAllPages<T>(
 ): Promise<T[]> {
   let after: string | null = null
   const items: T[] = []
+  const seenCursors = new Set<string>()
 
   while (true) {
     const data = (await gql(
@@ -171,14 +191,31 @@ async function fetchAllPages<T>(
     )) as Record<string, any> | undefined
 
     const page = data?.[rootKey]
-    const pageItems = (page?.items || []) as T[]
-    items.push(...pageItems)
-
-    if (!page?.pageInfo?.hasNextPage || !page?.pageInfo?.endCursor) {
-      break
+    const pageInfo = page?.pageInfo
+    if (
+      !page || typeof page !== "object" || Array.isArray(page) ||
+      !Array.isArray(page.items) ||
+      !pageInfo || typeof pageInfo !== "object" || Array.isArray(pageInfo) ||
+      typeof pageInfo.hasNextPage !== "boolean" ||
+      !(pageInfo.endCursor === null ||
+        (typeof pageInfo.endCursor === "string" && pageInfo.endCursor.trim().length > 0))
+    ) {
+      throw new Error(`Invalid indexer page for ${rootKey}: malformed pagination envelope.`)
     }
 
-    after = page.pageInfo.endCursor as string
+    const { hasNextPage, endCursor } = pageInfo
+    if (
+      (hasNextPage && (page.items.length === 0 || endCursor === null)) ||
+      (endCursor !== null && seenCursors.has(endCursor))
+    ) {
+      throw new Error(`Invalid indexer page for ${rootKey}: pagination did not progress.`)
+    }
+
+    items.push(...(page.items as T[]))
+    if (!hasNextPage) break
+
+    seenCursors.add(endCursor)
+    after = endCursor
   }
 
   return items
@@ -188,6 +225,14 @@ export async function fetchLeaves(
   assetId: number,
   options: IndexerQueryOptions = {}
 ): Promise<LeafRow[]> {
+  if (options.poolAddress) {
+    return fetchIndexerItems<LeafRow>(
+      "/events/leaves",
+      { assetId, pool: options.poolAddress },
+      options
+    )
+  }
+
   const query = `
     query($assetId:Int!, $limit:Int!, $after:String) {
       leafInsertedEvents(
@@ -343,6 +388,15 @@ export async function fetchRecoveryHeads(
   assetId: number,
   options: IndexerQueryOptions = {}
 ): Promise<RecoveryHeads> {
+  if (options.poolAddress) {
+    const url = new URL(`${resolveIndexerApiUrl(options)}/events/recovery-heads`)
+    url.searchParams.set("assetId", String(assetId))
+    url.searchParams.set("pool", options.poolAddress)
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`Indexer request failed with HTTP ${response.status}`)
+    return response.json() as Promise<RecoveryHeads>
+  }
+
   const query = `
     query($assetId:Int!) {
       leafInsertedEvents(where:{assetId:$assetId}, orderBy:"leafIndex", orderDirection:"desc", limit:1) {
@@ -374,6 +428,14 @@ export async function fetchRecoveryHeads(
 }
 
 export async function fetchEnvelopes(assetId: number, options: IndexerQueryOptions = {}) {
+  if (options.poolAddress) {
+    return fetchIndexerItems<EnvelopeRow>(
+      "/events/envelopes",
+      { assetId, pool: options.poolAddress },
+      options
+    )
+  }
+
   const query = `
     query($assetId:Int!, $limit:Int!, $after:String) {
       noteEnvelopeEvents(
@@ -395,6 +457,14 @@ export async function fetchWithdrawals(
   assetId: number,
   options: IndexerQueryOptions = {}
 ): Promise<WithdrawalRow[]> {
+  if (options.poolAddress) {
+    return fetchIndexerItems<WithdrawalRow>(
+      "/events/withdrawals",
+      { assetId, pool: options.poolAddress },
+      options
+    )
+  }
+
   const query = `
     query($assetId:Int!, $limit:Int!, $after:String) {
       batchWithdrawalEvents(
@@ -416,6 +486,14 @@ export async function fetchNullifiers(
   assetId: number,
   options: IndexerQueryOptions = {}
 ): Promise<NullifierRow[]> {
+  if (options.poolAddress) {
+    return fetchIndexerItems<NullifierRow>(
+      "/events/nullifiers",
+      { assetId, pool: options.poolAddress },
+      options
+    )
+  }
+
   const query = `
     query($assetId:Int!, $limit:Int!, $after:String) {
       batchWithdrawalEvents(
