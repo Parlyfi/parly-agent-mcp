@@ -1,14 +1,14 @@
-# Parly Unhosted MCP
+# Agent Selfhost MCP
 
-This is the developer-operated, agent-wallet MCP runtime exported to
-`Parlyfi/parly-mcp`. It is **not** the new Parly-operated, keyless OAuth Hosted MCP.
-Running Unhosted MCP on a server does not turn it into the Hosted MCP product.
+Developer-operated private payment tools, exported to
+[`Parlyfi/parly-agent-mcp`](https://github.com/Parlyfi/parly-agent-mcp).
+The current runtime uses V4 balances and V7 cross-chain payouts for USDC.e,
+USDT0 and OpenUSD (OUSD).
 
-Trusted local stdio and authenticated single-operator HTTP retain the operator's
-agent-wallet authority. Never share that wallet/token as a multi-user service.
-Remote HTTP requires an operator-controlled TLS proxy and restricted listener.
-See `.env.example` for the optional HTTP settings.
+Run locally over stdio or through an authenticated operator HTTP endpoint.
+Use a dedicated agent wallet and an operator-controlled TLS proxy for remote
+access. See `.env.example` for runtime and transport settings.
 
-The package ID `@parly/mcp-server`, protocol ID `parly-mcp`, export directory and
-repository URL stay unchanged for existing integrations. Human-facing product
-names and connection titles use **Unhosted MCP**.
+For connected account tools, use Parly Hosted MCP at `https://mcp.parly.fi/mcp`,
+or run Parly Selfhost MCP on infrastructure you control. The internal package
+ID remains `@parly/mcp-server` for existing integrations.

@@ -1,6 +1,6 @@
 {
-  "name": "parly-mcp-repo",
-  "description": "Agent Selfhost MCP: developer-operated agent tools, separate from Hosted MCP.",
+  "name": "parly-agent-mcp-repo",
+  "description": "Agent Selfhost MCP: SDK-backed private payment tools for developer-operated agents.",
   "private": true,
   "packageManager": "pnpm@10.6.0",
   "scripts": {

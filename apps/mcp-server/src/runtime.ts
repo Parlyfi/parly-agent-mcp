@@ -2,7 +2,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import {
   ParlyMppAdapter,
   ParlySDK,
-  type ExecuteCrossChainPayoutParams,
   type ExecuteBatchPaymentParams,
   type ExecutePaymentParams,
   type ExecutePaymentOutcome,
@@ -11,6 +10,8 @@ import {
   type MppSettlementRequest
 } from "@parly/sdk"
 import { z } from "zod"
+import { CurrentParlySDK, parseReceivingProfileV4 } from "@parly/sdk/current"
+import { createCurrentStorage } from "./current-storage.js"
 import { assertMcpConfig, type McpRuntimeConfig } from "./smoke-config.js"
 import { ParlyWebApiClient } from "./web-api-client.js"
 
@@ -25,6 +26,8 @@ const MCP_SUPPORTED_TOOLS = [
   "preflight_batch_shielded_payment",
   "send_batch_shielded_payment",
   "send_cross_chain_shielded_payment",
+  "get_cross_chain_payout_status",
+  "claim_cross_chain_payout_refund",
   "execute_shielded_payment",
   "mpp_create_session",
   "mpp_preflight_session_payment",
@@ -67,11 +70,13 @@ const MCP_WEB_API_TOOLS = [
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
 
-const assetIdSchema = z.union([z.literal(1), z.literal(2)])
+const legacyAssetIdSchema = z.union([z.literal(1), z.literal(2)])
+const assetIdSchema = z.union([z.literal(1), z.literal(2), z.literal(3)])
 const addressSchema = z
   .string()
   .regex(ADDRESS_RE, "Must be a 20-byte hex address.")
   .refine((value) => value.toLowerCase() !== ZERO_ADDRESS, "Must not be the zero address.")
+  .transform(value => value as `0x${string}`)
 const amountSchema = z
   .string()
   .regex(/^\d+(\.\d{1,6})?$/, "Amount must be a positive decimal string with up to 6 decimals.")
@@ -85,7 +90,7 @@ const mppSessionSchema = z.object({
   serviceVersion: z.string().min(1),
   sessionId: z.string().min(1),
   counterparty: addressSchema,
-  assetId: assetIdSchema,
+  assetId: legacyAssetIdSchema,
   spendLimit: amountSchema,
   destinationEid: z.number().int().positive(),
   poolAddress: addressSchema,
@@ -97,14 +102,15 @@ const shieldedPaymentSchema = z.object({
   assetId: assetIdSchema,
   destinationEid: z.number().int().positive(),
   poolAddress: addressSchema,
-  poolVersion: z.union([z.literal(2), z.literal(3)]).optional(),
+  poolVersion: z.union([z.literal(2), z.literal(3), z.literal(4)]).default(4),
   finalFees: amountSchema.or(z.literal("0")).optional(),
   consolidationFee: amountSchema.or(z.literal("0")).optional(),
   proofAssetsBasePath: z.string().min(1).optional()
 })
 const privateBalanceSchema = z.object({
   assetId: assetIdSchema,
-  poolAddress: addressSchema
+  poolAddress: addressSchema,
+  poolVersion: z.union([z.literal(3), z.literal(4)]).default(4)
 })
 const privateSendPlanSchema = privateBalanceSchema.extend({
   amount: amountSchema,
@@ -121,17 +127,19 @@ const batchShieldedPaymentSchema = z.object({
   ).min(1).max(10),
   assetId: assetIdSchema,
   poolAddress: addressSchema,
+  poolVersion: z.union([z.literal(2), z.literal(4)]).default(4),
   proofAssetsBasePath: z.string().min(1).optional()
 })
 const crossChainShieldedPaymentSchema = z.object({
   destinationChainId: z.number().int().positive(),
   destinationToken: addressSchema,
   destinationRecipient: addressSchema,
-  amount: amountSchema,
+  amount: z.string().regex(/^\d+(\.\d{1,36})?$/).refine(value => /[1-9]/.test(value)),
   assetId: assetIdSchema,
   poolAddress: addressSchema,
   proofAssetsBasePath: z.string().min(1).optional()
 })
+const payoutManifestSchema = z.object({ manifestHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/).transform(value => value as `0x${string}`) })
 const webApiGetSchema = z.object({
   query: z.record(z.union([z.string(), z.number(), z.boolean()])).optional()
 })
@@ -264,6 +272,31 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     proofAssetsBasePath: config.proofAssetsBasePath,
     webApiBaseUrl: config.webApiBaseUrl
   })
+  const currentProfile = config.currentSdkConfig ? parseReceivingProfileV4(JSON.stringify(config.currentSdkConfig.profile)) : null
+  if (currentProfile && (currentProfile.chainId !== config.tempoChainId || currentProfile.settlementDomain !== BigInt(config.settlementDomainId))) throw Error("Current MCP profile does not match the configured native domain.")
+  const currentStorage = currentProfile ? createCurrentStorage(config.currentStoragePath!) : null
+  const currentSdk = config.currentSdkConfig ? new CurrentParlySDK({
+    ...config.currentSdkConfig,
+    profile: currentProfile!,
+    privateKeyHex: config.agentPrivateKey,
+    tempoRpcUrl: config.tempoRpcUrl,
+    tempoLzEid: config.settlementDomainId,
+    ponderGraphqlUrl: config.ponderGraphqlUrl!,
+    proofAssetsBasePath: config.proofAssetsBasePath!,
+    webApiBaseUrl: config.webApiBaseUrl!,
+    storage: currentStorage!
+  }) : null
+  function current() {
+    if (!currentSdk) throw Error("Current V4 SDK configuration is required.")
+    return currentSdk
+  }
+  function currentExecution<T>(operation: (sdk: CurrentParlySDK) => Promise<T>) {
+    const sdk = current()
+    return currentStorage!.withExclusiveExecution(() => operation(sdk))
+  }
+  function historicalAsset(assetId: number): asserts assetId is 1 | 2 {
+    if (assetId !== 1 && assetId !== 2) throw Error("This asset requires the current V4 profile.")
+  }
 
   const adapter =
     config.enableMppAdapter && config.mppServiceName && config.mppServiceVersion
@@ -290,7 +323,7 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
   function privateOutput(value: unknown): boolean {
     if (typeof value === "string") return privateValues.some(secret => value.includes(secret))
     if (Array.isArray(value)) return value.some(privateOutput)
-    return !!value && typeof value === "object" && Object.entries(value).some(([key, item]) => /^(?:privatekey(?:hex)?|agentprivatekey|spend(?:ing)?(?:key|scalar)|view(?:ing)?(?:key|scalar)|notesecret|recoverykey|encryptionkey|seedphrase|mnemonic|authorization|bearertoken|apikey)$/u.test(key.replace(/[-_]/g, "").toLowerCase()) || privateOutput(item))
+    return !!value && typeof value === "object" && Object.entries(value).some(([key, item]) => /^(?:privatekey(?:hex|b64)?|recoveryprivatekey(?:b64)?|agentprivatekey|spend(?:ing)?(?:key|scalar)|view(?:ing)?(?:key|scalar)|rho|refundsalts?|notesecret|recoverykey|encryptionkey|seedphrase|mnemonic|authorization|bearertoken|apikey)$/u.test(key.replace(/[-_]/g, "").toLowerCase()) || privateOutput(item))
   }
 
   function registerTool(
@@ -345,7 +378,9 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
       webApiTools: webApi ? [...MCP_WEB_API_TOOLS] : [],
       verificationModel: "lane-scoped selective disclosure",
       mppAdapterEnabled: Boolean(adapter),
-      webApiEnabled: Boolean(webApi)
+      webApiEnabled: Boolean(webApi),
+      poolVersion: currentSdk ? 4 : null,
+      payoutVersion: currentSdk ? 7 : null
     })
   )
 
@@ -400,7 +435,7 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
       description:
         "Recover the largest live Parly note for the AGENT wallet from chain envelopes and indexed history.",
       inputSchema: z.object({
-        assetId: assetIdSchema
+        assetId: legacyAssetIdSchema
       })
     },
     async ({ assetId }) => {
@@ -431,12 +466,14 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     {
       title: "Get Private Balance",
       description:
-        "Return the PoolV3 total private balance, immediately spendable amount, note count, and consolidation requirement without note identifiers.",
+        "Return the current PoolV4 private balance and spendability without note identifiers; PoolV3 history is available only when requested explicitly.",
       inputSchema: privateBalanceSchema
     },
     async (args) => {
       try {
-        const balance = await sdk.getPrivateBalance(args)
+        const balance = args.poolVersion === 3
+          ? (historicalAsset(args.assetId), await sdk.getPrivateBalance({ ...args, assetId: args.assetId }))
+          : await current().getPrivateBalance(args)
         return jsonToolResponse({
           status: "ok",
           tool: "get_private_balance",
@@ -453,12 +490,14 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     {
       title: "Prepare Private Send",
       description:
-        "Automatically plan a deterministic PoolV3 spend and report whether consolidation is required without exposing note or proof internals.",
+        "Plan a current PoolV4 spend without exposing note or proof internals; historical PoolV3 plans require an explicit poolVersion.",
       inputSchema: privateSendPlanSchema
     },
     async (args) => {
       try {
-        const plan = await sdk.preparePrivateSend(args)
+        const plan = args.poolVersion === 3
+          ? (historicalAsset(args.assetId), await sdk.preparePrivateSend({ ...args, assetId: args.assetId }))
+          : await current().preparePrivateSend(args)
         return jsonToolResponse({
           status: "ok",
           tool: "prepare_private_send",
@@ -480,12 +519,14 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
           "PoolV3 execution is not available through this legacy send tool. Use prepare_private_send for a redacted PoolV3 plan."
         )
       }
-      const outcome = await sdk.sendShieldedPayment(args as ExecutePaymentParams)
+      const legacy = args.poolVersion === 2
+      if (legacy) historicalAsset(args.assetId)
+      const outcome = legacy ? await sdk.sendShieldedPayment(args as ExecutePaymentParams) : await currentExecution(client => client.sendShieldedPayment(args))
       return jsonToolResponse({
         status: "ok",
         tool,
-        poolVersion: 2,
-        historyCompatibility: "historical_v2",
+        poolVersion: legacy ? 2 : 4,
+        historyCompatibility: legacy ? "historical_v2" : "current_v4",
         routeMode:
           args.destinationEid === config.settlementDomainId
             ? "same-chain"
@@ -514,7 +555,8 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     },
     async (args) => {
       try {
-        const privateBalancePlan =
+        const privateBalancePlan = (args.poolVersion ?? 4) === 4
+          ? await current().preparePrivateSend(args) :
           args.poolVersion === 3
             ? await sdk.preparePrivateSend({
                 assetId: args.assetId,
@@ -536,9 +578,9 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
             poolAddress: args.poolAddress,
             destination: args.destination,
             destinationEid: args.destinationEid,
-            poolVersion: args.poolVersion ?? 2,
+            poolVersion: args.poolVersion ?? 4,
             historyCompatibility:
-              args.poolVersion === 3 ? "pool_v2_read_only" : "historical_v2",
+              args.poolVersion === 3 ? "pool_v2_read_only" : args.poolVersion === 2 ? "historical_v2" : "current_v4",
             ...(privateBalancePlan ? { privateBalancePlan } : {})
           }
         })
@@ -553,7 +595,7 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     {
       title: "Send Shielded Payment",
       description:
-        "Send from the AGENT wallet's largest live Parly note with the same outcome model as direct SDK execution.",
+        "Send a current PoolV4 payment from the AGENT wallet; historical PoolV2 execution requires poolVersion 2.",
       inputSchema: shieldedPaymentSchema
     },
     async (args) => handleShieldedPaymentTool("send_shielded_payment", args)
@@ -581,7 +623,8 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
           assetId: args.assetId,
           poolAddress: args.poolAddress,
           outputCount: args.outputs.length,
-          outputs: args.outputs
+          outputs: args.outputs,
+          ...((args.poolVersion ?? 4) === 4 ? { privateBalancePlan: await current().preparePrivateBatchSend(args) } : {})
         }
       })
   )
@@ -591,12 +634,14 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     {
       title: "Send Batch Shielded Payment",
       description:
-        "Send up to 10 same-chain private payment lanes from the AGENT wallet's largest live Parly note.",
+        "Send up to 10 same-chain current PoolV4 payment lanes from the AGENT wallet.",
       inputSchema: batchShieldedPaymentSchema
     },
     async (args) => {
       try {
-        const outcome = await sdk.sendShieldedBatchPayment(args as ExecuteBatchPaymentParams)
+        const legacy = args.poolVersion === 2
+        if (legacy) historicalAsset(args.assetId)
+        const outcome = legacy ? await sdk.sendShieldedBatchPayment(args as ExecuteBatchPaymentParams) : await currentExecution(client => client.sendShieldedBatchPayment(args))
         return jsonToolResponse({
           status: "ok",
           tool: "send_batch_shielded_payment",
@@ -624,24 +669,37 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
     },
     async (args) => {
       try {
-        const outcome = await sdk.sendCrossChainShieldedPayment(args as ExecuteCrossChainPayoutParams)
-        if (outcome.kind === "terminal_failure") {
-          return jsonToolError("send_cross_chain_shielded_payment", outcome.message)
-        }
+        const outcome = await currentExecution(client => client.sendCrossChainShieldedPayment(args))
         return jsonToolResponse({
           status: "submitted",
           tool: "send_cross_chain_shielded_payment",
-          payoutId: outcome.payoutId,
-          supportReference: outcome.supportReference,
-          statusAccessToken: outcome.statusAccessToken,
+          manifestHash: outcome.manifestHash,
+          children: outcome.children.map((child: { intentHash: string; payoutId: string }) => ({ intentHash: child.intentHash, payoutId: child.payoutId })),
           lifecycle: "pending",
-          followUp: "Use payout_status_read until objective destination completion or a claimant-bound refund is confirmed."
+          followUp: "Use get_cross_chain_payout_status with this manifestHash until objective destination completion or a claimant-bound refund is confirmed."
         })
       } catch (error) {
         return jsonToolError("send_cross_chain_shielded_payment", error)
       }
     }
   )
+
+  registerTool("get_cross_chain_payout_status", {
+    title: "Get Cross-Chain Payout Status",
+    description: "Read wallet-owned V7 payout progress using retained recovery records without exposing capsule or refund secrets.",
+    inputSchema: payoutManifestSchema
+  }, async ({ manifestHash }) => {
+    const payout = await current().getCrossChainPayoutStatus(manifestHash)
+    return jsonToolResponse({ status: "ok", tool: "get_cross_chain_payout_status", manifestHash, authorized: payout.authorized,
+      children: payout.children.map(child => ({ intentHash: child.intentHash, status: child.status, destinationChainId: child.destinationChainId,
+        destinationToken: child.destinationToken, destinationAmountOutBaseUnits: child.destinationAmountOutBaseUnits, recoveryAvailableAt: child.recoveryAvailableAt })) })
+  })
+  registerTool("claim_cross_chain_payout_refund", {
+    title: "Claim Cross-Chain Payout Refund",
+    description: "Claim a mature V7 refund for the operator wallet from its retained recovery record.",
+    inputSchema: payoutManifestSchema
+  }, async ({ manifestHash }) => jsonToolResponse({ status: "submitted", tool: "claim_cross_chain_payout_refund", manifestHash,
+    hashes: await currentExecution(client => client.claimPayoutV7Refund(manifestHash)) }))
 
   registerTool(
     "execute_shielded_payment",
@@ -664,7 +722,7 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
         inputSchema: z.object({
           sessionId: z.string().min(1),
           counterparty: addressSchema,
-          assetId: assetIdSchema,
+          assetId: legacyAssetIdSchema,
           spendLimit: amountSchema,
           destinationEid: z.number().int().positive(),
           poolAddress: addressSchema
@@ -932,7 +990,7 @@ export function buildParlyMcpRuntime(env: NodeJS.ProcessEnv = process.env): Parl
           if (!/^\d+(\.\d{1,6})?$/u.test(amount) || Number(amount) <= 0) {
             throw new Error(`Batch CSV row ${index + 1} has an invalid amount.`)
           }
-          if (!/^(USDC|USDC\.e|USDT|USDT0)$/u.test(asset)) {
+          if (!/^(USDC|USDC\.e|USDT|USDT0|OUSD|OpenUSD)$/u.test(asset)) {
             throw new Error(`Batch CSV row ${index + 1} has an unsupported asset.`)
           }
           return { destination, amount, asset }

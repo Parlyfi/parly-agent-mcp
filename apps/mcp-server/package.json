@@ -1,6 +1,6 @@
 {
   "name": "@parly/mcp-server",
-  "description": "Parly Unhosted MCP: operator-controlled agent-wallet tools.",
+  "description": "Agent Selfhost MCP: SDK-backed private payment tools for developer-operated agents.",
   "version": "16.9.10-mcp.0",
   "private": true,
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "pnpm run build:deps && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test:security": "node --test script/http-security-tests.mjs script/mcp-readiness-tests.mjs script/web-api-security-tests.mjs",
+    "test:security": "node --test script/http-security-tests.mjs script/mcp-readiness-tests.mjs script/web-api-security-tests.mjs script/current-storage-tests.mjs",
     "start": "pnpm run build && node ./script/sync-workspace-dist.mjs && node dist/apps/mcp-server/src/index.js",
     "smoke:config": "node dist/apps/mcp-server/src/smoke-config.js",
     "smoke:tools": "node dist/apps/mcp-server/src/smoke-tools.js",

@@ -72,7 +72,7 @@ test("MPP PoolV3 preflight returns only the redacted SDK plan", () => {
 test("MCP exposes Send naming while keeping the legacy execute alias", () => {
   assert.match(runtimeSource, /send_shielded_payment/u)
   assert.match(runtimeSource, /send_cross_chain_shielded_payment/u)
-  assert.match(runtimeSource, /sdk\.sendCrossChainShieldedPayment/u)
+  assert.match(runtimeSource, /currentExecution\(client => client\.sendCrossChainShieldedPayment/u)
   assert.match(runtimeSource, /lifecycle: "pending"/u)
   assert.doesNotMatch(runtimeSource, /outcome\.recovery|refundSalt/u)
   assert.match(runtimeSource, /send_batch_shielded_payment/u)

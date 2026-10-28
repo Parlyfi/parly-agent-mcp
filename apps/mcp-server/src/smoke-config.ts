@@ -1,5 +1,6 @@
 import "./load-env.js"
 import { requireEnv, requirePositiveChainIdValue } from "@parly/env-utils"
+import type { CurrentParlySDKConfig } from "@parly/sdk/current"
 
 const MCP_PHASE3_PROFILE = "phase3-tempo4217"
 const MCP_LEGACY_PROFILE = "legacy-moderato-v1"
@@ -19,6 +20,8 @@ export type McpRuntimeConfig = {
   mppServiceVersion?: string
   webApiBaseUrl?: string
   webApiBearerToken?: string
+  currentSdkConfig?: Omit<CurrentParlySDKConfig, "privateKeyHex" | "tempoRpcUrl" | "tempoLzEid" | "ponderGraphqlUrl" | "proofAssetsBasePath" | "webApiBaseUrl" | "storage">
+  currentStoragePath?: string
 }
 
 function requirePrivateKey(name: string, env: NodeJS.ProcessEnv): `0x${string}` {
@@ -89,6 +92,16 @@ export function assertMcpConfig(env: NodeJS.ProcessEnv = process.env): McpRuntim
     enableMppAdapter: enableMppAdapter === "true",
     webApiBaseUrl: normalizeWebApiBaseUrl(env.PARLY_WEB_API_BASE_URL),
     webApiBearerToken: env.PARLY_MCP_WEB_API_BEARER_TOKEN
+  }
+
+  if (env.PARLY_CURRENT_SDK_CONFIG_JSON) {
+    const value: unknown = JSON.parse(env.PARLY_CURRENT_SDK_CONFIG_JSON)
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("PARLY_CURRENT_SDK_CONFIG_JSON must be an object.")
+    config.currentSdkConfig = value as McpRuntimeConfig["currentSdkConfig"]
+    config.currentStoragePath = requireEnv("PARLY_CURRENT_STORAGE_PATH", env)
+    requireEnv("PONDER_GRAPHQL_URL", { PONDER_GRAPHQL_URL: config.ponderGraphqlUrl })
+    requireEnv("PARLY_SDK_ASSETS_PATH", env)
+    requireEnv("PARLY_WEB_API_BASE_URL", env)
   }
 
   if (config.enableMppAdapter) {

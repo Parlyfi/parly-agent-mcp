@@ -1,11 +1,12 @@
 # Agent Selfhost MCP
 
-Parly supports USDC, USDT and OpenUSD (OUSD). Token availability varies by network.
-This package's security release does not add V4/V7 execution or OpenUSD support.
-Its versioned agent engine remains separate from the web app's active routes.
+Payment tools for developer-operated AI agents, using Parly's V4 private balances
+and V7 cross-chain payouts. Supported Tempo assets are USDC.e, USDT0 and
+OpenUSD (OUSD); destination assets depend on the active route.
 
-Agent Selfhost MCP is the developer-operated product for Parly agent integrations. It is not the new
-Parly-operated, keyless OAuth Hosted MCP. HTTP hosting does not change this product's identity.
+Agent Selfhost MCP runs with your configured agent wallet. For wallet-connected
+account tools, choose Parly Hosted MCP at `https://mcp.parly.fi/mcp`, or run
+Parly Selfhost MCP on infrastructure you control.
 
 ## What this project is
 
@@ -14,8 +15,8 @@ tools to agent stacks.
 
 ## Who this project is for
 
-Use this project when an agent needs controlled access to Parly private-send tooling. The MCP server
-uses AGENT authority only. It is not a relayer runtime and must not be configured with relayer keys.
+Use this project for agents that recover private balances, prepare payments and
+execute them through a dedicated agent wallet.
 
 ## Install
 
@@ -54,12 +55,14 @@ reuse the wallet key or the separate outbound API token.
 - `SETTLEMENT_DOMAIN_ID=4217`
 - `PONDER_GRAPHQL_URL`
 - `PARLY_SDK_ASSETS_PATH`
+- `PARLY_CURRENT_SDK_CONFIG_JSON`
+- `PARLY_CURRENT_STORAGE_PATH`
 - optional MPP adapter flags
 - optional app API bridge: `PARLY_WEB_API_BASE_URL`
 - optional app API auth: `PARLY_MCP_WEB_API_BEARER_TOKEN`
 
-Public exports intentionally omit proving keys. Configure `PARLY_SDK_ASSETS_PATH` if your proof
-assets live outside the package tree.
+Configure the current client's verified profile, deployment blocks and pinned
+proof assets as described in [COMPATIBILITY.md](./COMPATIBILITY.md).
 
 ## Supported tools
 
@@ -76,6 +79,9 @@ Private balance tools:
 
 MPP tools:
 
+MPP retains its versioned PoolV2 session interface for USDC.e and USDT0. The
+current V4/V7 payment tools above use the separate current SDK configuration.
+
 - `mpp_create_session`
 - `mpp_preflight_session_payment`
 - `mpp_settle_session_payment`
@@ -90,42 +96,27 @@ App API tools, when `PARLY_WEB_API_BASE_URL` is configured:
 `execute_shielded_payment` is a compatibility alias. New integrations should use
 `send_shielded_payment`.
 
-`get_private_balance` returns six-decimal PoolV3 base-unit totals, note count, immediately
-spendable balance, and whether consolidation is required. `prepare_private_send` uses deterministic
-note selection and returns a redacted plan. Historical PoolV2 reads remain available, but PoolV2
-notes are never mixed into a PoolV3 plan.
+`get_private_balance` returns the recovered V4 balance and note count.
+`prepare_private_send` selects inputs and returns the amount, fees and change
+without exposing note secrets. Single and batch Send use the same current SDK
+execution path. V7 routes provide cross-chain quotes, delivery tracking and
+eligible refund recovery.
 
-Deposit and Privacy Link routes use the active pool version returned by Parly. PoolV3 activates only
-after both supported asset routes are configured. An incomplete route stops before payment
-authorization and never silently falls back to PoolV2. Connected-wallet deposits, one-time deposit
-addresses, and Privacy Links shield the exact principal; existing PoolV2 records remain available
-for recovery and review.
+Privacy Link and deposit tools use Parly's admitted payment routes. Existing
+versioned recovery remains available for earlier funded notes.
 
 ## Resources
 
 - `parly://launch-context`
 - `parly://security-notes`
 
-## Security notes
+## Operation
 
-- Version 16.9.10 removes private launch configuration from SDK/MCP resources and bounds HTTP/API
-  inputs and outputs. Upgrade both packages. If an older service was reachable by untrusted users,
-  treat its agent key and configured credentials as potentially exposed. Contain it and review key
-  rotation and funded-note recovery before using it again; this patch does not revoke old keys.
-- MCP uses AGENT key authority only.
-- Relayer keys do not belong in this project.
-- Privacy Links, Verify, payment routes, and relayer registration are public web/API product
-  surfaces. MCP can call those APIs when configured, but it does not bypass wallet signatures,
-  rate limits, 403 policy checks, or audit history.
-- This package exposes user, payer, and relayer-facing payment flows. Operational controls stay in
-  Parly's governed product surfaces.
-- Batch private sends are currently available on the same chain. Cross-chain deposits use Parly
-  payment routes. Cross-chain private sends become available through MCP when a supported public
-  payout route is active.
-- MPP session tools are available through both the SDK and MCP.
-- Preflight tools do not generate proofs, request signatures, or submit transactions.
-- MCP responses redact known private configuration, reject sensitive key fields and return generic
-  dependency errors. This is not a sandbox for untrusted plugins or arbitrary third-party payloads.
-- This security repair does not migrate the developer wallet engine to V4/V7 or add OpenUSD. Its
-  legacy execution/planning support is separate from the current web application's active routes;
-  qualify a route before funding it. Do not infer compatibility from the app API bridge.
+Use a dedicated agent wallet and store its credentials on your server. The local
+operator controls that wallet; the HTTP operator token authorizes its tools.
+Preflight checks prepare a review without submitting a payment. Retain pending
+payment records and check their outcome before retrying an interrupted request.
+
+Public API tools use the wallet authorization and permissions required by each
+Parly action. Private configuration and note secrets are excluded from tool
+responses. See [CHANGELOG.md](./CHANGELOG.md) for version-specific security updates.

@@ -1,5 +1,11 @@
 # Agent Selfhost MCP Changelog
 
+## Unreleased
+
+- Uses the current V4 SDK for private balances, preparation and single/batch payments.
+- Adds V7 cross-chain payout tools and OpenUSD (OUSD).
+- Documents the distinction between Agent Selfhost MCP and the two Parly MCP hosting options.
+
 ## 16.9.10-mcp.0
 
 - Name this developer-operated product Agent Selfhost MCP, distinct from the new Hosted MCP.
@@ -9,6 +15,10 @@
 - Redact launch configuration, dependency errors and unexpected private tool fields.
 - Reject cross-origin API redirects; distinguish operator auth from outbound credentials.
 - Test security behavior in the generated standalone export.
+
+Earlier versions could expose private launch configuration through resources. Operators
+who exposed those versions to untrusted clients should review affected credentials
+and preserve access to funded notes while rotating them.
 
 ## 16.9.9-mcp.0
 

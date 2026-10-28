@@ -6,6 +6,10 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./current": {
+      "types": "./dist/current.d.ts",
+      "default": "./dist/current.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -41,6 +45,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test:security": "node --test scripts/launch-context-redaction.test.mjs",
+    "test:current": "pnpm run build && node --test scripts/current-v4.test.mjs scripts/current-client.test.mjs scripts/current-transport.test.mjs",
     "sync:proof-assets": "node ./scripts/sync-proof-assets.mjs",
     "test:lz-options": "pnpm run build && node ./scripts/verify-lz-options.mjs",
     "test:phase3-legacy-gates": "pnpm --filter @parly/shared-types run build && pnpm run build && node --test scripts/phase3-legacy-gates.test.mjs scripts/phase3-payout-v5.test.mjs",

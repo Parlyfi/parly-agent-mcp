@@ -20,7 +20,8 @@ const syntheticConfig = {
   mppServiceName: "test-service",
   mppServiceVersion: "1",
   webApiBaseUrl: "https://web.invalid/synthetic-web-secret",
-  webApiBearerToken: "synthetic-outbound-bearer-secret"
+  webApiBearerToken: "synthetic-outbound-bearer-secret",
+  currentSdkConfig: { profile: { chainId: 4217, settlementDomain: "4217" } }, currentStoragePath: "C:/synthetic-pending.json"
 }
 
 function isolatedRuntime(options = {}) {
@@ -37,12 +38,15 @@ function isolatedRuntime(options = {}) {
     async recoverLargestNote() { return { best: { amount: 1_000_000n, noteSecret: syntheticConfig.agentPrivateKey } } }
     async getPrivateBalance() { if (options.error) throw Error(options.error); return options.payload ?? { totalAmount: "1000000", noteCount: 1 } }
     async preparePrivateSend() { return { status: "ready", totalRequired: "1000000" } }
+    async preparePrivateBatchSend() { return { status: "ready", totalRequired: "1000000" } }
     async sendShieldedPayment() { return options.outcome ?? success }
     async sendShieldedBatchPayment() { return success }
     async sendCrossChainShieldedPayment() {
       return { kind: "relayer_submitted", payoutId: "synthetic-payout", supportReference: "synthetic-support",
         statusAccessToken: "synthetic-status-token", recovery: { key: syntheticConfig.agentPrivateKey } }
     }
+    async getCrossChainPayoutStatus() { return { authorized: true, children: [] } }
+    async claimPayoutV7Refund() { return [] }
   }
   class SyntheticMpp {
     async createSession(args) { return { ...args, version: 1, status: "created" } }
@@ -58,8 +62,16 @@ function isolatedRuntime(options = {}) {
   const dependencies = {
     "@modelcontextprotocol/sdk/server/mcp.js": { McpServer: ResourceCaptureServer },
     "@parly/sdk": { ParlySDK: SyntheticSdk, ParlyMppAdapter: SyntheticMpp },
+    "@parly/sdk/current": { parseReceivingProfileV4: raw => { const p = JSON.parse(raw); return { ...p, settlementDomain: BigInt(p.settlementDomain) } }, CurrentParlySDK: class extends SyntheticSdk {
+      async getPrivateBalance(args) { options.calls?.push(["balance", args]); return super.getPrivateBalance(args) }
+      async preparePrivateSend(args) { options.calls?.push(["prepare", args]); return super.preparePrivateSend(args) }
+      async sendShieldedPayment(args) { options.calls?.push(["single", args]); return super.sendShieldedPayment(args) }
+      async sendShieldedBatchPayment(args) { options.calls?.push(["batch", args]); return super.sendShieldedBatchPayment(args) }
+      async sendCrossChainShieldedPayment(args) { options.calls?.push(["v7", args]); return { kind: "relayer_submitted", manifestHash: "synthetic-manifest", children: [] } }
+    } },
+    "./current-storage.js": { createCurrentStorage: () => ({ withExclusiveExecution: operation => operation() }) },
     zod: { z },
-    "./smoke-config.js": { assertMcpConfig: () => ({ ...syntheticConfig }) },
+    "./smoke-config.js": { assertMcpConfig: () => ({ ...syntheticConfig, ...(options.noCurrent ? { currentSdkConfig: undefined } : {}), ...(options.profile ? { currentSdkConfig: { profile: options.profile } } : {}) }) },
     "./web-api-client.js": { ParlyWebApiClient: class {
       async getJson() { return options.webPayload ?? { ok: true } }
       async postJson() { return options.webPayload ?? { ok: true } }
@@ -85,6 +97,39 @@ test("operator runtime identifies itself as Agent Selfhost MCP, not Parly Hosted
   const { serverInfo } = isolatedRuntime()
   assert.equal(serverInfo.title, "Agent Selfhost MCP")
   assert.equal(serverInfo.name, "parly-mcp", "Preserve the existing protocol identifier")
+})
+
+test("current balance, preparation, single, batch and V7 route all admitted assets through the current SDK", async () => {
+  const calls = [], { tools } = isolatedRuntime({ calls }), address = `0x${"33".repeat(20)}`
+  for (const assetId of [1, 2, 3]) {
+    const balance = { assetId, poolAddress: address, poolVersion: 4 }
+    for (const [name, args] of [
+      ["get_private_balance", balance], ["prepare_private_send", { ...balance, amount: "1" }],
+      ["send_shielded_payment", { ...balance, destination: address, destinationEid: 4217, amount: "1" }],
+      ["send_batch_shielded_payment", { ...balance, outputs: [{ destination: address, destinationEid: 4217, amount: "1" }] }],
+      ["send_cross_chain_shielded_payment", { ...balance, destinationChainId: 10, destinationToken: address, destinationRecipient: address, amount: "1" }]
+    ]) {
+      assert.equal(tools.get(name).metadata.inputSchema.safeParse(args).success, true, name)
+      assert.notEqual((await tools.get(name).handler(args)).isError, true, name)
+    }
+  }
+  assert.deepEqual(calls.map(([name]) => name), Array.from({ length: 3 }, () => ["balance", "prepare", "single", "batch", "v7"]).flat())
+})
+
+test("current routes never fall back when the current SDK profile is unavailable", async () => {
+  const { tools } = isolatedRuntime({ noCurrent: true }), address = `0x${"33".repeat(20)}`
+  const result = await tools.get("send_shielded_payment").handler({ assetId: 3, poolVersion: 4, poolAddress: address, destination: address, destinationEid: 4217, amount: "1" })
+  assert.equal(result.isError, true)
+})
+
+test("incompatible current profile fails before tool registration and OpenUSD cannot enter historical execution", async () => {
+  assert.throws(() => isolatedRuntime({ profile: { chainId: 42431, settlementDomain: "40439" } }), /native domain/)
+  const { tools } = isolatedRuntime(), address = `0x${"33".repeat(20)}`
+  assert.equal(tools.get("send_shielded_payment").metadata.inputSchema.parse({ assetId: 1, poolAddress: address, destination: address, amount: "1", destinationEid: 4217 }).poolVersion, 4)
+  const legacy = await tools.get("send_shielded_payment").handler({ assetId: 3, poolVersion: 2, poolAddress: address, destination: address, amount: "1", destinationEid: 4217 })
+  assert.equal(legacy.isError, true)
+  const csv = await tools.get("parse_batch_csv").handler({ csv: `${address},1.25,OUSD` })
+  assert.notEqual(csv.isError, true)
 })
 
 test("all public MCP resources exclude synthetic runtime credentials and private configuration", async () => {
@@ -135,12 +180,14 @@ test("registered tool metadata and synthetic successful tool outputs do not seri
     send_cross_chain_shielded_payment: { ...balance, destinationChainId: 10,
       destinationToken: address, destinationRecipient: address, amount: "1" },
     execute_shielded_payment: payment,
+    get_cross_chain_payout_status: { manifestHash: `0x${"55".repeat(32)}` },
+    claim_cross_chain_payout_refund: { manifestHash: `0x${"55".repeat(32)}` },
     mpp_create_session: session,
     mpp_preflight_session_payment: { session, destination: address, amount: "1", poolVersion: 3 },
     mpp_settle_session_payment: { session, destination: address, amount: "1" },
     parse_batch_csv: { csv: `${address},1,USDC` }
   }
-  assert.equal(tools.size, 44)
+  assert.equal(tools.size, 46)
   for (const [name, { metadata, handler }] of tools) {
     const input = inputs[name] ?? { body: {}, query: {} }
     const response = await handler(input)
@@ -158,7 +205,8 @@ test("dependency errors never echo configured credentials or credential-bearing 
 })
 
 test("unexpected private fields and configured secrets fail closed in SDK and upstream web responses", async () => {
-  for (const payload of [{ privateKeyHex: "synthetic-unrelated-secret" }, { nested: { viewScalar: "123456" } }, { data: syntheticConfig.webApiBearerToken }]) {
+  for (const payload of [{ privateKeyHex: "synthetic-unrelated-secret" }, { nested: { viewScalar: "123456" } }, { data: syntheticConfig.webApiBearerToken },
+    { recoveryPrivateKeyB64: "synthetic-unrelated-secret" }, { privateKeyB64: "synthetic-unrelated-secret" }, { nested: { rho: "123456" } }, { refundSalts: ["synthetic-unrelated-secret"] }]) {
     const { tools } = isolatedRuntime({ payload, webPayload: payload })
     for (const [name, input] of [["get_private_balance", { assetId: 1, poolAddress: `0x${"33".repeat(20)}` }], ["privacy_link_status", { query: {} }]]) {
       const result = await tools.get(name).handler(input)

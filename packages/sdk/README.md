@@ -1,30 +1,38 @@
 # @parly/sdk
 
-TypeScript SDK for Parly private stablecoin payments on Tempo.
+TypeScript SDK for private stablecoin payments with V4 balances and V7 cross-chain payouts.
 
-The SDK helps agent and server integrations recover private notes, prepare proofs, and send from a
-Parly private balance. It supports the two Phase 3 asset lanes:
+Current Tempo assets:
 
 - `assetId: 1` - Tempo USDC.e
 - `assetId: 2` - Tempo USDT0
+- `assetId: 3` - OpenUSD (OUSD)
 
-## Core APIs
+## Current API
 
-- `ParlySDK.fromEnv()` creates an SDK client from server-side environment variables.
-- `getPrivateBalance(params)` returns six-decimal PoolV3 base-unit totals, note count, and the
-  consolidation requirement.
-- `preparePrivateSend(params)` automatically selects the deterministic PoolV3 input set and returns
-  one redacted spend or consolidation summary.
-- `recoverLargestNote(assetId, poolAddress)` remains available for historical PoolV2 recovery.
-- `sendShieldedPayment(params)` sends from a recovered private note.
-- `sendShieldedBatchPayment(params)` sends up to 10 same-chain private payout lanes from one note.
-- `executeShieldedPayment(params)` remains as a compatibility alias for older integrations.
-- `ParlyMppAdapter` adds MPP session creation, preflight, and settlement helpers at the SDK boundary.
+Import `CurrentParlySDK` from `@parly/sdk/current` for current integrations.
 
-## MPP support
+- `getPrivateBalance()` recovers the V4 balance from verified canonical history.
+- `preparePrivateSend()` selects inputs and returns the amount, fees and change.
+- `sendShieldedPayment()` sends to one same-chain recipient.
+- `sendShieldedBatchPayment()` sends to up to ten same-chain recipients.
+- `sendCrossChainShieldedPayment()` uses a V7 cross-chain payout route.
+- V7 quote, authorization, status and refund helpers expose the payout lifecycle.
 
-MPP support is intentionally narrow. It does not change pool semantics or give an agent relayer
-authority. Use:
+Configure the client with its execution wallet, RPC, verified V4 profile, deployment
+blocks, history endpoint, proof assets and V7 pins. The recovery context preserves
+the existing wallet-derived keys. Retain pending records using the storage
+interface so interrupted submissions can be reconciled.
+
+Use one active writer per execution wallet. Coordinate writes with a process-shared
+lock if several processes share that wallet. Agent Selfhost MCP supplies this
+coordination for its HTTP runtime.
+
+## Versioned integrations
+
+The existing `ParlySDK` API remains available for earlier pool integrations.
+Its `ParlyMppAdapter` provides session creation, preflight and settlement with
+counterparty and spend-limit checks:
 
 - `createSession()` to create a bounded payment session.
 - `preflightSessionPayment()` to validate session ID, counterparty, amount, asset, destination, and
@@ -33,10 +41,10 @@ authority. Use:
 - `preflightPoolV3SessionPayment()` to add a redacted PoolV3 balance plan without returning note
   identifiers or proof material.
 
-PoolV3 preparation never returns note secrets, commitments, nullifiers, Merkle paths, or recovery
-keys. PoolV2 history remains readable for recovery, but it is not mixed into PoolV3 selection.
+Use the current client for V4 notes and the explicit versioned API for earlier
+funded notes. Public balance and preparation summaries omit note secrets.
 
-## Environment
+## Server configuration
 
 Use server-only variables for SDK execution:
 
@@ -47,16 +55,17 @@ Use server-only variables for SDK execution:
 - `PONDER_GRAPHQL_URL`
 - `PARLY_SDK_ASSETS_PATH`
 
-Provider credentials, Relay keys, and private keys must stay server-side. Do not expose them through
-`NEXT_PUBLIC_*` variables.
-
-Cross-chain deposits are served by the Parly payment-route APIs. Cross-chain private sends are not
-enabled in this SDK path until the dedicated payout route is exposed through the public API.
+Store signing and provider credentials in server-side secret settings. Cross-chain
+destination support follows the admitted V7 route; token availability varies by
+network.
 
 ## Proof assets
 
-Public package exports intentionally omit proving keys. Point `PARLY_SDK_ASSETS_PATH` at a trusted
-local proof-assets directory containing:
+The current client uses the pinned V4 proof artifacts. The versioned client uses
+its configured `joinsplit.wasm` and `joinsplit_final.zkey`. Select proof assets for
+the client and circuit version you are using.
 
-- `joinsplit.wasm`
-- `joinsplit_final.zkey`
+After building, run `pnpm run sync:proof-assets` in this package to verify the
+current files in `assets/`. Use `--source <verified-directory>` for a local copy,
+or explicitly pass `--download` to fetch the pinned files from Parly. Point
+`proofAssetsBasePath` at this package's assets directory.
